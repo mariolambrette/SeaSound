@@ -1,0 +1,292 @@
+"""
+seasound/core/config.py
+
+Defined Config dataclasses which are used by the pipeline. Handles the loading,
+validation, and CLI merging of all configurable parameters. The default
+configuration is stored in config/default_config.yaml.
+
+Configuration validation occurs in three stages:
+    1. load_yaml()    - Parse the YAML file into a dict
+    2. merge_cli()    - Merge the CLI overrides
+    3. validate()     - typecheck, range-check and return the final
+                          PipelineConfig dataclass instance.
+
+Validation errors raise ConfigError with a human-readable message
+listing all problems (not just the first one found).
+"""
+
+import os
+from dataclasses import dataclass, field
+from typing import Optional
+import yaml
+
+from seasound.core.exceptions import ConfigError
+
+# ---------------------------------------------------------------------------
+# Dataclass definitions — one per config section
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class InputConfig:
+    """Configuration for audio file discovery and reading."""
+    path: str = "./data/raw/"
+    pattern: str = "*.wav"
+    recursive: bool = True
+    filename_format: str = "soundtrap"
+    channel_strategy: str = "auto"
+    selected_channel: int = 0
+    custom_regex: Optional[str] = None
+    custom_datetime_format: Optional[str] = None
+
+
+@dataclass
+class CalibrationConfig:
+    """Configuration for hydrophone calibration."""
+    enabled: bool = True
+    strict: bool = True
+    file: str = "./data/SoundTrapCalibration.xlsx"
+    sensitivity_column: str = "High_Gain"
+    vpp: float = 2.0
+
+
+@dataclass
+class BufferHoursConfig:
+    """Configuration for trimming deployment start/end."""
+    deploy: float = 1.0
+    retrieve: float = 1.0
+
+
+@dataclass
+class DeploymentConfig:
+    """Configuration for trimming deployment start/end."""
+    enabled: bool = False
+    metadata_file: str = ""
+    station: str = ""
+    hydrophone: str = ""
+    buffer_hours: BufferHoursConfig = field(
+        default_factory=BufferHoursConfig
+    )
+
+
+@dataclass
+class OutputConfig:
+    """Where and how outputs are written."""
+    directory: str = "./output/"
+    overwrite: bool = False
+    naming: str = "{station}_{hydrophone}_{analysis}_{params}"
+
+
+@dataclass
+class ProcessingConfig:
+    """Core pipeline processing parameters."""
+    resume: bool = True
+    workers: int = 0
+    max_freq_hz: float = 50000.0
+    min_freq_hz: float = 10.0
+    base_resolution_s: int = 1
+    reference_pressure_pa: float = 1e-6
+    domain: str = "underwater"
+    missing_band_strategy: str = "nan"
+    cache_base_matrix: bool = True
+    cache_directory: Optional[str] = None
+
+
+@dataclass
+class PipelineConfig:
+    """Top-level configuration container."""
+    input: InputConfig = field(default_factory=InputConfig)
+    calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
+    deployment: DeploymentConfig = field(default_factory=DeploymentConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
+    pipeline: ProcessingConfig = field(default_factory=ProcessingConfig)
+    analyses: dict = field(default_factory=dict)
+
+    # Runtime flags (set by CLI, not YAML)
+    ingest_only: bool = False
+    analyse_only: bool = False
+    dry_run: bool = False
+    log_level: str = "INFO"
+
+
+# ---------------------------------------------------------------------------
+# Loading
+# ---------------------------------------------------------------------------
+
+def load_yaml(path: str) -> dict:
+    """Parse a YAML config file into a raw dict."""
+    if not os.path.isfile(path):
+        raise ConfigError(f"Config file not found: {path}")
+    try:
+        with open(path, "r") as f:
+            raw = yaml.safe_load(f)
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Invalid YAML in {path}: {exc}")
+    if raw is None:
+        raw = {}
+    return raw
+
+
+def merge_cli(base: dict, overrides: dict) -> dict:
+    """
+    Deep-merge CLI overrides in the YAML dict.
+
+    CLI keys use dot notation mapped to the nested keys:
+        "input.path" -> base["input"]["path"]
+
+    Parameters
+    ----------
+    base : dict
+        Parsed YAML config.
+    overrides : dict
+        CLI overrides as flat dot-notation keys.
+        Example: {"input.path": "/data/wav", "pipeline.workers": 4}
+
+    Returns
+    -------
+    dict
+        Merged config dict.
+    """
+    if not overrides:
+        return base
+
+    for dotted_key, value in overrides.items():
+        keys = dotted_key.split(".")
+        d = base
+        for k in keys[:-1]:
+            if k not in d:
+                d[k] = {}
+            d = d[k]
+        d[keys[-1]] = value
+
+    return base
+
+
+def _build_dataclass(cls, data: dict):
+    """
+    Recursively build a dataclass from a dict, ignoring unknown keys.
+    Handles nested dataclasses by inspecting field types.
+    """
+    import dataclasses
+
+    if not isinstance(data, dict):
+        return data
+
+    kwargs = {}
+    for f in dataclasses.fields(cls):
+        if f.name not in data:
+            continue
+        val = data[f.name]
+
+        # Check if the field type is itself a dataclass
+        if dataclasses.is_dataclass(f.type):
+            val = _build_dataclass(f.type, val if isinstance(val, dict) else {})
+
+        kwargs[f.name] = val
+
+    return cls(**kwargs)
+
+
+def validate(raw: dict) -> PipelineConfig:
+    """
+    Convert raw dict to PipelineConfig, checking constraints.
+
+    Collects all errors before raising so the user sees everything
+    they need to fix in one pass.
+    """
+    errors = []
+
+    # Build the typed config
+    config = _build_dataclass(PipelineConfig, raw)
+
+    # --- Input validation ---
+    if not os.path.isdir(config.input.path) and not config.analyse_only:
+        errors.append(
+            f"input.path '{config.input.path}' is not a directory. "
+            f"Create it or set the correct path."
+        )
+
+    valid_formats = {"soundtrap", "wildlife", "iclisten", "custom"}
+    if config.input.filename_format not in valid_formats:
+        errors.append(
+            f"input.filename_format '{config.input.filename_format}' "
+            f"must be one of: {', '.join(sorted(valid_formats))}"
+        )
+
+    valid_channels = {"mono", "auto", "select", "dual_gain"}
+    if config.input.channel_strategy not in valid_channels:
+        errors.append(
+            f"input.channel_strategy '{config.input.channel_strategy}' "
+            f"must be one of: {', '.join(sorted(valid_channels))}"
+        )
+
+    # --- Calibration validation ---
+    if config.calibration.enabled and config.calibration.strict:
+        if not os.path.isfile(config.calibration.file) and not config.analyse_only:
+            errors.append(
+                f"calibration.file '{config.calibration.file}' not found. "
+                f"Provide the file or set calibration.strict: false"
+            )
+
+    if config.calibration.vpp <= 0:
+        errors.append("calibration.vpp must be positive")
+
+    # --- Pipeline validation ---
+    if config.pipeline.base_resolution_s < 1:
+        errors.append("pipeline.base_resolution_s must be >= 1")
+
+    if config.pipeline.reference_pressure_pa <= 0:
+        errors.append("pipeline.reference_pressure_pa must be positive")
+
+    valid_strategies = {"nan", "clip", "error"}
+    if config.pipeline.missing_band_strategy not in valid_strategies:
+        errors.append(
+            f"pipeline.missing_band_strategy must be one of: "
+            f"{', '.join(sorted(valid_strategies))}"
+        )
+
+    if config.pipeline.max_freq_hz <= config.pipeline.min_freq_hz:
+        errors.append(
+            "pipeline.max_freq_hz must be greater than pipeline.min_freq_hz"
+        )
+
+    # --- Deployment validation ---
+    if config.deployment.enabled:
+        if not config.deployment.metadata_file:
+            errors.append(
+                "deployment.metadata_file is required when deployment.enabled is true"
+            )
+        if not config.deployment.station:
+            errors.append(
+                "deployment.station is required when deployment.enabled is true"
+            )
+
+    # --- Raise all errors at once ---
+    if errors:
+        msg = "Configuration errors:\n" + "\n".join(f"  • {e}" for e in errors)
+        raise ConfigError(msg)
+
+    return config
+
+
+def load_config(
+    config_path: str,
+    cli_overrides: dict = None,
+) -> PipelineConfig:
+    """
+    Public API: load YAML, merge CLI overrides, validate, return typed config.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to YAML configuration file.
+    cli_overrides : dict, optional
+        Flat dot-notation overrides from CLI.
+
+    Returns
+    -------
+    PipelineConfig
+    """
+    raw = load_yaml(config_path)
+    raw = merge_cli(raw, cli_overrides or {})
+    return validate(raw)

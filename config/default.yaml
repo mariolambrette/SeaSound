@@ -1,0 +1,288 @@
+# ===========================================================================
+# SeaSound Pipeline Default Configuration
+# ===========================================================================
+#
+# This YAML file defines all configurable parameters in the SeaSound pipeline.
+# Users should consider it a user-guide to the pipeline options. It can be
+# copied and modified to create configurations for specific projects.
+#
+# Usage:
+#   seasound --config config/default.yaml --input ./raw_wav/
+#   seasound --config config/default.yaml --analyse-only
+#
+# ===========================================================================
+
+# -----------------------------------------------------------------------------
+# Input Options
+# -----------------------------------------------------------------------------
+input:
+  # Path to directory containing audio files
+  path: "./data/raw/"
+
+  # Glob pattern for matching audio files within the directory
+  pattern: "*.wav"
+
+  # Search subdirectories for matching files
+  recursive: true
+
+  # Filename parsing strategy:
+  #   "soundtrap"  — expects SERIAL.YYMMDDHHMMSS.wav
+  #   "wildlife"   — expects PREFIX_YYYYMMDD_HHMMSS.wav
+  #   "iclisten"   — expects icListenHF_SERIAL_YYYYMMDD_HHMMSS.wav
+  #   "custom"     — uses custom_regex below
+  filename_format: "soundtrap"
+
+  # Only used when filename_format is "custom".
+  # Must contain named groups: (?P<serial>...) and (?P<datetime>...)
+  # The datetime group is parsed with datetime_strptime_format below.
+  # custom_regex: "(?P<serial>\\d+)\\.(?P<datetime>\\d{12})\\.wav"
+  # custom_datetime_format: "%y%m%d%H%M%S"
+
+  # Multi-channel handling:
+  #   "auto"       — detect channels, produce separate output for each
+  #   "mono"       — average all channels to mono
+  #   "select"     — use only selected_channel (0-indexed)
+  #   "dual_gain"  — SoundTrap ST600: merge high/low gain channels
+  channel_strategy: "auto"
+  selected_channel: 0
+
+# -----------------------------------------------------------------------------
+# Calibration
+# -----------------------------------------------------------------------------
+calibration:
+  # Set to false to skip calibration entirely (output will be in
+  # arbitrary units, not dB re reference pressure)
+  enabled: true
+
+  # When true, missing or invalid calibration data is a fatal error.
+  # When false, uncalibrated data is processed with a warning.
+  strict: true
+
+  # Path to calibration spreadsheet (Excel .xlsx)
+  file: "./data/SoundTrapCalibration.xlsx"
+
+  # Column name in the spreadsheet containing sensitivity values.
+  # The spreadsheet must also have a column parseable as serial number.
+  sensitivity_column: "High_Gain"
+
+  # Peak-to-peak voltage of the recording system (volts)
+  vpp: 2.0
+
+# -----------------------------------------------------------------------------
+# Deployment Clipping (optional)
+# -----------------------------------------------------------------------------
+# Trim the start and end of the recording to remove handling noise
+# from deployment and retrieval. Currently can trim a fixed time period
+# (in hours) from the start and end of each deplyoment
+deployment:
+  enabled: false
+
+  metadata_file: "./data/MetaData.xlsx"
+  station: "S1"
+  hydrophone: "1111"
+
+  # Hours to clip from each end
+  buffer_hours:
+    deploy: 1
+    retrieve: 1
+
+# -----------------------------------------------------------------------------
+# Output Options
+# -----------------------------------------------------------------------------
+output:
+  # Directory where all output files are written
+  directory: "./output/"
+
+  # Overwrite existing output files. If false and outputs exist, raises error.
+  overwrite: false
+
+  # Output filename template. Available placeholders:
+  #   {station}, {hydrophone}, {analysis}, {params}, {ext}
+  # Falls back to input folder name if deployment config is disabled.
+  naming: "{station}_{hydrophone}_{analysis}_{params}"
+
+# -----------------------------------------------------------------------------
+# Pipeline Options
+# -----------------------------------------------------------------------------
+pipeline:
+  # Resume mode: skip WAV files whose base matrix Parquet already exists in the
+  # specified output folder.
+  resume: true
+
+  # Number of parallel workers for ingestion.
+  #   0    = automatic (CPU count - 2)
+  #   1    = single-threaded (useful for debugging)
+  #   N>1  = use N workers
+  workers: 0
+
+  # Maximum frequency for TOB analysis (Hz).
+  # Bands above this frequency are not computed.
+  max_freq_hz: 50000
+
+  # Minimum frequency for TOB analysis (Hz).
+  min_freq_hz: 10
+
+  # Base resolution for the intermediate matrix (seconds).
+  # 1 second is the standard; changing this is advanced usage.
+  base_resolution_s: 1
+
+  # Reference pressure for dB conversion (Pa).
+  #   Underwater: 1.0e-6  (1 µPa)
+  #   In-air:     2.0e-5  (20 µPa)
+  reference_pressure_pa: 1.0e-6
+
+  # Label used in axis titles and reports ("underwater" or "in-air")
+  domain: "underwater"
+
+  # What to do when a file's sample rate cannot reach max_freq_hz:
+  #   "nan"   — fill unreachable bands with NaN (default, recommended)
+  #   "clip"  — silently reduce max_freq to what the file supports
+  #   "error" — raise an error and stop
+  missing_band_strategy: "nan"
+
+  # Persist base matrix to Parquet for re-analysis.
+  # Strongly recommended. Only set false for one-shot processing where
+  # disk space is critically limited.
+  cache_base_matrix: true
+
+  # Directory for cached Parquet files.
+  # Default: a ".cache/" subdirectory of the output directory.
+  # cache_directory: "./output/.cache/"
+
+# -----------------------------------------------------------------------------
+# Analyses
+# -----------------------------------------------------------------------------
+# Each analysis block follows the pattern:
+#   <name>:
+#     enabled: true/false
+#     type: "<algorithm>"       (only for modules with multiple algorithms)
+#     config:
+#       <parameter>: <value>
+#
+# Analyses run in the order listed below. The "report" module always
+# runs last regardless of position.
+# -----------------------------------------------------------------------------
+
+analyses:
+  spectrogram:
+    enabled: true
+    config:
+      # Time resolution for spectrogram display (seconds per pixel column).
+      # Smaller = finer temporal detail, larger files.
+      time_resolution_s: 60
+
+      # Frequency axis range (Hz)
+      freq_range: [10, 50000]
+
+      # Colour scale limits (dB re reference pressure).
+      # Set to null for automatic scaling.
+      color_limits: [60, 120]
+
+      # Colour map name (any matplotlib colormap)
+      colormap: "viridis"
+
+      # Output format: "png", "pdf", or "csv" (raw spectrogram matrix)
+      output_format: "png"
+
+      # Image DPI (only for png/pdf)
+      dpi: 300
+
+      # Whether to re-read WAV files for full-resolution FFT spectrograms.
+      # When false, uses the TOB base matrix (coarser frequency resolution
+      # but no additional I/O). When true, produces a standard narrowband
+      # spectrogram by re-reading audio files.
+      high_resolution: false
+
+      # FFT parameters for high-resolution mode only:
+      fft_window_s: 0.05
+      fft_overlap: 0.5
+
+  tob_levels:
+    enabled: true
+    config:
+      # Summary time windows. Each produces a separate output file.
+      # Use pandas offset aliases: "1s", "10s", "1min", "1h", "12h", "24h"
+      summary_windows: ["1min", "1h", "12h", "24h"]
+
+      # Statistic used to summarise each window
+      statistic: "median"
+
+      # Additional per-window statistics to include alongside the primary
+      # statistic. Set to empty list to only output the primary statistic.
+      additional_stats: ["mean", "std"]
+
+      # Specific TOB bands to include in output (Hz).
+      # Set to null to include all bands.
+      # bands_hz: [63, 125, 200, 500, 1000, 2000]
+      bands_hz: null
+
+      output_format: "csv"
+
+  spectral_percentiles:
+    enabled: true
+    config:
+      # Percentiles to compute
+      percentiles: [1, 5, 25, 50, 75, 95, 99]
+
+      # Window over which percentiles are computed:
+      #   "full" = entire deployment (single output)
+      #   Any pandas offset alias = per-window percentiles
+      window: "full"
+
+      output_format: "csv"
+
+  ltsa:
+    enabled: true
+    config:
+      # Time resolution for the LTSA (pandas offset alias)
+      time_resolution: "1h"
+
+      # Statistic for aggregation within each time bin
+      statistic: "median"
+
+      # Frequency range to include (Hz). null = all bands.
+      freq_range: null
+
+      output_format: "csv"
+
+  event_detection:
+    enabled: true
+
+    # Detection algorithm. Currently supported:
+    #   "adaptive_threshold" — rolling baseline + dB exceedance
+    # Planned:
+    #   "acoustic_complexity" — scikit-maad ACI-based detection
+    type: "adaptive_threshold"
+
+    config:
+      # Frequency range for broadband SPL summation (Hz)
+      broadband_freq_range: [100, 50000]
+
+      # Rolling baseline parameters
+      baseline_window_hours: 1
+      baseline_percentile: 10
+
+      # Detection threshold: flag when broadband SPL exceeds
+      # baseline + this many dB
+      threshold_db: 10.0
+
+      # Minimum event duration (seconds). Shorter detections are discarded.
+      min_duration_s: 3
+
+      # Merge gap: events separated by fewer than this many seconds
+      # are combined into a single event.
+      merge_gap_s: 30
+
+      output_format: "csv"
+
+  report:
+    enabled: true
+    config:
+      # Report includes all enabled analyses automatically.
+      # Paper size for the PDF
+      paper_size: "A4"
+
+      # DPI for embedded plots
+      dpi: 300
+
+      output_format: "pdf"

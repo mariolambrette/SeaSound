@@ -1,0 +1,2 @@
+[console_scripts]
+seasound = seasound.core.pipeline:cli_main
