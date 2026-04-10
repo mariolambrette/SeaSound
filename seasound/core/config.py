@@ -56,11 +56,9 @@ class CalibrationConfig:
 
 @dataclass
 class DeploymentBufferConfig:
-    start: float = 1.0
-    end: float = 1.0
-    # Legacy aliases for metadata method
-    deploy: float = 1.0
-    retrieve: float = 1.0
+    """Shared clipping buffer in hours, regardless of the clip source."""
+    start: float = 0.0
+    end: float = 0.0
 
 
 @dataclass
@@ -69,12 +67,15 @@ class DeploymentConfig:
     Configuration for trimming deployment start/end.
 
     Three clipping methods:
-      "manual"   — explicit start_utc / end_utc datetimes
-      "auto"     — trim N hours from data start/end
-      "metadata" — look up times from a metadata spreadsheet
+        1. "none" - default, do not explicity clip data, use the full recording.
+        2. "manual" - explicit user-specified start and end datetimes (UTC)
+            specified in the config file.
+        3. "metadata" - Look up deployment start and end times based on a
+            metadata table (see config/deployment_metadata_format.csv for an
+            example).
     """
     enabled: bool = False
-    clip_method: str = "manual"
+    clip_method: str = "none"
 
     # --- manual method ---
     start_utc: Optional[str] = None
@@ -87,8 +88,8 @@ class DeploymentConfig:
 
     # --- metadata method ---
     metadata_file: str = ""
-    metadata_format: str = "seasound"   # NEW: "seasound" or "excel"
-    metadata_columns: dict = field(     # NEW: only used by "excel" format
+    metadata_format: str = "seasound"
+    metadata_columns: dict = field(
         default_factory=lambda: {
             "location_id": "Location_ID",
             "hydrophone": "Hydrophone",
@@ -134,7 +135,7 @@ class PipelineConfig:
     analyses: dict = field(default_factory=dict)
 
     # Runtime flags (set by CLI, not YAML)
-    ingest_only: bool = False
+    load_only: bool = False
     analyse_only: bool = False
     dry_run: bool = False
     log_level: str = "INFO"
@@ -302,7 +303,7 @@ def validate(raw: dict) -> PipelineConfig:
 
     # --- Deployment validation ---
     if config.deployment.enabled:
-        valid_clip_methods = {"manual", "auto", "metadata"}
+        valid_clip_methods = {"none", "manual", "metadata"}
         method = config.deployment.clip_method
         if method not in valid_clip_methods:
             errors.append(
@@ -333,6 +334,11 @@ def validate(raw: dict) -> PipelineConfig:
                     "deployment.location_id is required when "
                     "clip_method is 'metadata'"
                 )
+
+        if config.deployment.buffer_hours.start < 0:
+            errors.append("deployment.buffer_hours.start must be >= 0")
+        if config.deployment.buffer_hours.end < 0:
+            errors.append("deployment.buffer_hours.end must be >= 0")
 
     # --- Raise all errors at once ---
     if errors:

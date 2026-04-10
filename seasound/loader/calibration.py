@@ -1,5 +1,5 @@
 """
-seasound/ingest/calibration.py
+seasound/loader/calibration.py
 
 Hydrophone calibration: load sensitivity data and convert normalised
 audio samples to acoustic pressure in Pascals.
@@ -232,7 +232,5 @@ def apply_calibration(
         f"method={config.method}, "
         f"sensitivity={sens_db:.1f} dB"
     )
-
-    return pressure_pa, True
 
     return pressure_pa, True

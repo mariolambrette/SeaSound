@@ -84,24 +84,36 @@ calibration:
 #
 deployment:
   enabled: false
-  clip_method: "manual"   # "manual", "auto", or "metadata"
+  
+  # Specify the method for clipping deployment recordings. If "none", no
+  # clipping is applied. "manaual" uses the start_utc and end_utc parameters .
+  # "metadata" reads start and end times from a metadata spreadsheet using the
+  # specified metdata reading function (metadata_format parameter below).
+  clip_method: "none"
 
-  # --- manual method: explicit datetime bounds ---
-  # start_utc: "2025-10-11 13:00:00"
-  # end_utc: "2026-01-15 11:00:00"
+  # --- manual method: explicit datetime bounds (YYYY-MM-DD HH:MM:SS utc) ---
+  start_utc: null
+  end_utc: null
 
-  # --- auto method: trim from data edges ---
+  # --- Buffer data ---
+  # Following clipping (or if clipping is disabled) a fixed buffer can be
+  # applied to the start and end of the recording. Specify the HOURS of data
+  # to trim from the start and enf of the deployment below
   buffer_hours:
-    start: 1
-    end: 1
+    start: 0.0 # Remove from start of the recording (hours)
+    end: 0.0 # Remove from end of the recording (hours)
 
   # --- metadata method ---
-  metadata_file: "./data/deployment_metadata.csv"
+  metadata_file: ""
   metadata_format: "seasound"      # "seasound" (CSV) or "excel" (custom columns)
   location_id: "11"
   hydrophone: "1111"
 
   # Only needed when metadata_format is "excel":
+  # Uncooment the lines below and specify the column headers in the metadata
+  # spreadsheet. The combination of location_id and hydrophone should point
+  # to a single unique row in the spreadsheet. deploy and retrieve should then
+  # point to the column containing deployment start and end times in UTC.
   # metadata_columns:
   #   location_id: "Location_ID"
   #   hydrophone: "Hydrophone"
@@ -131,7 +143,7 @@ pipeline:
   # specified output folder.
   resume: true
 
-  # Number of parallel workers for ingestion.
+  # Number of parallel workers for data loading.
   #   0    = automatic (CPU count - 2)
   #   1    = single-threaded (useful for debugging)
   #   N>1  = use N workers

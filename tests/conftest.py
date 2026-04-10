@@ -125,7 +125,9 @@ def test_config(tmp_path, sample_calibration_file):
             enabled=True,
             strict=False,
             file=sample_calibration_file,
+            serial_column="Serial",
             sensitivity_column="High_Gain",
+            method="soundtrap",
             vpp=2.0,
         ),
         deployment=DeploymentConfig(enabled=False),
@@ -141,3 +143,25 @@ def test_config(tmp_path, sample_calibration_file):
             cache_base_matrix=True,
         ),
     )
+
+
+@pytest.fixture
+def synthetic_stereo_wav(tmp_path):
+    """
+    Generate a 10-second stereo WAV file for resume/channel tests.
+    Channel 0: 1000 Hz sine
+    Channel 1: 2000 Hz sine
+    """
+    if sf is None:
+        pytest.skip("soundfile not installed")
+
+    sr = 96000
+    duration = 10
+    t = np.arange(sr * duration) / sr
+    ch0 = 0.5 * np.sin(2 * np.pi * 1000 * t)
+    ch1 = 0.5 * np.sin(2 * np.pi * 2000 * t)
+    audio = np.column_stack([ch0, ch1])
+
+    filepath = str(tmp_path / "9999.260101120000.wav")
+    sf.write(filepath, audio, sr)
+    return filepath

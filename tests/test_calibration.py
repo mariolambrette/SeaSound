@@ -1,6 +1,7 @@
 """Tests for the calibration module."""
 
 import numpy as np
+import pandas as pd
 import pytest
 from seasound.loader.calibration import load_calibration, apply_calibration
 from seasound.loader.reader import AudioSegment
@@ -72,6 +73,120 @@ class TestApplyCalibration:
         expected_pa = (volts / sens_linear) * 1e-6
 
         np.testing.assert_allclose(audio_pa, [expected_pa], rtol=1e-10)
+
+    def test_missing_serial_strict_raises(self, sample_calibration_file):
+        config = CalibrationConfig(
+            enabled=True,
+            strict=True,
+            file=sample_calibration_file,
+            serial_column="Serial",
+            sensitivity_column="High_Gain",
+            method="soundtrap",
+            vpp=2.0,
+        )
+        cal_df = load_calibration(config)
+
+        segment = AudioSegment(
+            data=np.array([0.1]),
+            sample_rate=96000,
+            serial=None,
+            datetime_start=None,
+            channel=0,
+            source_file="test.wav",
+        )
+
+        with pytest.raises(Exception):
+            apply_calibration(segment, cal_df, config)
+
+    def test_missing_serial_non_strict_returns_uncalibrated(self, sample_calibration_file):
+        config = CalibrationConfig(
+            enabled=True,
+            strict=False,
+            file=sample_calibration_file,
+            serial_column="Serial",
+            sensitivity_column="High_Gain",
+            method="soundtrap",
+            vpp=2.0,
+        )
+        cal_df = load_calibration(config)
+
+        raw = np.array([0.1, -0.2])
+        segment = AudioSegment(
+            data=raw,
+            sample_rate=96000,
+            serial=None,
+            datetime_start=None,
+            channel=0,
+            source_file="test.wav",
+        )
+
+        audio_pa, calibrated = apply_calibration(segment, cal_df, config)
+        assert calibrated is False
+        np.testing.assert_allclose(audio_pa, raw)
+
+    def test_nan_sensitivity_strict_raises(self, tmp_path):
+        df = pd.DataFrame({
+            "Serial": ["9999"],
+            "High_Gain": [np.nan],
+        })
+        cal_path = str(tmp_path / "cal_nan.xlsx")
+        df.to_excel(cal_path, index=False)
+
+        config = CalibrationConfig(
+            enabled=True,
+            strict=True,
+            file=cal_path,
+            serial_column="Serial",
+            sensitivity_column="High_Gain",
+            method="soundtrap",
+            vpp=2.0,
+        )
+        cal_df = load_calibration(config)
+
+        segment = AudioSegment(
+            data=np.array([0.2]),
+            sample_rate=96000,
+            serial="9999",
+            datetime_start=None,
+            channel=0,
+            source_file="test.wav",
+        )
+
+        with pytest.raises(Exception):
+            apply_calibration(segment, cal_df, config)
+
+    def test_nan_sensitivity_non_strict_returns_uncalibrated(self, tmp_path):
+        df = pd.DataFrame({
+            "Serial": ["9999"],
+            "High_Gain": [np.nan],
+        })
+        cal_path = str(tmp_path / "cal_nan.xlsx")
+        df.to_excel(cal_path, index=False)
+
+        config = CalibrationConfig(
+            enabled=True,
+            strict=False,
+            file=cal_path,
+            serial_column="Serial",
+            sensitivity_column="High_Gain",
+            method="soundtrap",
+            vpp=2.0,
+        )
+        cal_df = load_calibration(config)
+
+        raw = np.array([0.2, -0.2])
+        segment = AudioSegment(
+            data=raw,
+            sample_rate=96000,
+            serial="9999",
+            datetime_start=None,
+            channel=0,
+            source_file="test.wav",
+        )
+
+        audio_pa, calibrated = apply_calibration(segment, cal_df, config)
+        assert calibrated is False
+        np.testing.assert_allclose(audio_pa, raw)
 
 
 class TestCalibrationMethods:

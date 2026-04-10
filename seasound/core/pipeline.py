@@ -12,7 +12,7 @@ import glob
 import json
 import logging
 import time as time_module
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from multiprocessing import Pool, cpu_count
 from functools import partial
 from typing import Optional
@@ -65,103 +65,103 @@ def find_audio_files(config: PipelineConfig) -> list[str]:
 # Deployment clipping
 # ---------------------------------------------------------------------------
 
-def get_clip_bounds(
+def _resolve_raw_bounds(
     config: PipelineConfig,
-    matrix: pd.DataFrame | None = None,
-) -> tuple:
-    """
-    Determine temporal clip bounds based on the configured method.
-
-    Parameters
-    ----------
-    config : PipelineConfig
-    matrix : pd.DataFrame, optional
-        The base matrix (needed for "auto" method).
-
-    Returns
-    -------
-    tuple of (clip_start, clip_end) or (None, None) if disabled.
-    """
-    if not config.deployment.enabled:
-        return None, None
-
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    """Resolve unbuffered clipping bounds from the configured source."""
     method = config.deployment.clip_method
+
+    if method == "none":
+        return None, None
 
     if method == "manual":
         start_raw = config.deployment.start_utc
         end_raw = config.deployment.end_utc
 
         if start_raw is None or end_raw is None:
-            raise SeaSoundError(
-                "Manual clip method requires both 'start_utc' and 'end_utc'."
+            logger.warning(
+                "Manual clipping requested but start_utc/end_utc are missing; "
+                "proceeding without clipping"
             )
+            return None, None
 
         try:
-            clip_start = pd.Timestamp(start_raw)
-            clip_end = pd.Timestamp(end_raw)
+            return pd.Timestamp(start_raw), pd.Timestamp(end_raw)
         except Exception as exc:
-            raise SeaSoundError(
-                f"Could not parse deployment datetimes: {exc}. "
-                f"Use format: YYYY-MM-DD HH:MM:SS"
+            logger.warning(
+                f"Could not parse manual clip datetimes ({exc}); "
+                "proceeding without clipping"
             )
+            return None, None
 
-        if clip_start >= clip_end:
-            raise SeaSoundError(
-                f"Deployment start ({clip_start}) must be before "
-                f"end ({clip_end})"
+    if method == "metadata":
+        try:
+            return _load_clip_from_metadata(config)
+        except Exception as exc:
+            logger.warning(
+                f"Could not resolve metadata clip bounds ({exc}); "
+                "proceeding without clipping"
             )
+            return None, None
 
-        logger.info(f"Manual clip window: {clip_start} → {clip_end}")
-        return clip_start, clip_end
-
-    elif method == "auto":
-        if matrix is None or matrix.empty:
-            raise SeaSoundError(
-                "'auto' clip method requires a non-empty base matrix. "
-                "This usually means no data was loaded."
-            )
-
-        buf = config.deployment.buffer_hours
-        clip_start = matrix.index.min() + timedelta(hours=buf.start)
-        clip_end = matrix.index.max() - timedelta(hours=buf.end)
-
-        if clip_start >= clip_end:
-            raise SeaSoundError(
-                f"Auto clip window is empty after trimming "
-                f"{buf.start}h from start and {buf.end}h from end. "
-                f"Data spans {matrix.index.min()} → {matrix.index.max()}"
-            )
-
-        logger.info(f"Auto clip window: {clip_start} → {clip_end}")
-        return clip_start, clip_end
-
-    elif method == "metadata":
-        return _load_clip_from_metadata(config)
-
-    else:
-        raise SeaSoundError(f"Unknown clip_method: {method}")
+    raise SeaSoundError(f"Unknown clip_method: {method}")
 
 
-def _load_clip_from_metadata(config: PipelineConfig) -> tuple:
-    reader = get_metadata_reader(config.deployment)
-    window = reader.read(
-        config.deployment.metadata_file,
-        config.deployment.location_id,
-        config.deployment.hydrophone,
-    )
+def _apply_shared_buffer(
+    start: pd.Timestamp | None,
+    end: pd.Timestamp | None,
+    config: PipelineConfig,
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    """Apply shared start/end clipping buffer in hours."""
+    if start is None or end is None:
+        return None, None
 
     buf = config.deployment.buffer_hours
-    clip_start = window.deploy_utc + timedelta(hours=buf.deploy)
-    clip_end = window.retrieve_utc - timedelta(hours=buf.retrieve)
+    clip_start = start + timedelta(hours=buf.start)
+    clip_end = end - timedelta(hours=buf.end)
 
     if clip_start >= clip_end:
         raise SeaSoundError(
             f"Clip window is empty after buffers: {clip_start} → {clip_end}"
         )
 
-    logger.info(f"Metadata clip window: {clip_start} → {clip_end}")
     return clip_start, clip_end
 
+
+def get_clip_bounds(
+    config: PipelineConfig,
+    matrix: pd.DataFrame | None = None,
+) -> tuple:
+    """Determine temporal clip bounds and apply shared buffering."""
+    if not config.deployment.enabled:
+        return None, None
+
+    method = config.deployment.clip_method
+    raw_start, raw_end = _resolve_raw_bounds(config)
+
+    # Only "none" mode is allowed to derive bounds from matrix extent.
+    if method == "none" and matrix is not None and not matrix.empty:
+        raw_start = matrix.index.min()
+        raw_end = matrix.index.max()
+
+    clip_start, clip_end = _apply_shared_buffer(raw_start, raw_end, config)
+
+    if clip_start is None:
+        logger.info("No clipping applied; using full dataset")
+    else:
+        logger.info(f"Clip window: {clip_start} → {clip_end}")
+
+    return clip_start, clip_end
+
+
+def _load_clip_from_metadata(config: PipelineConfig) -> tuple[pd.Timestamp, pd.Timestamp]:
+    reader = get_metadata_reader(config.deployment)
+    window = reader.read(
+        config.deployment.metadata_file,
+        config.deployment.location_id,
+        config.deployment.hydrophone,
+    )
+    return pd.Timestamp(window.deploy_utc), pd.Timestamp(window.retrieve_utc)
 
 # ---------------------------------------------------------------------------
 # Single-file processing (used by both serial and parallel modes)
@@ -240,11 +240,11 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
     if config.pipeline.resume:
         uncached = [
             f for f in wav_files
-            if not is_cached(f, 0, cache_dir)  # channel 0 check
+            if not _is_fully_cached(f, config, cache_dir)
         ]
         n_skipped = len(wav_files) - len(uncached)
         if n_skipped > 0:
-            logger.info(f"Resuming: skipping {n_skipped} already-cached file(s)")
+            logger.info(f"Resuming: skipping {n_skipped} fully-cached file(s)")
         files_to_process = uncached
     else:
         files_to_process = wav_files
@@ -315,7 +315,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
                         )
 
         logger.info(
-            f"Ingestion complete: {successes}/{total} files processed"
+            f"Loading complete: {successes}/{total} files processed"
         )
 
     # Load all cached matrices (including previously cached ones)
@@ -335,14 +335,48 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
 
     return full_matrix
 
+
+def _expected_channels_for_file(wav_path: str, config: PipelineConfig) -> list[int]:
+    """Return output channel IDs expected for this file under current strategy."""
+    parser = get_parser(config.input)
+    segments = read_audio(wav_path, config.input, parser=parser)
+    return [seg.channel for seg in segments]
+
+
+def _is_fully_cached(wav_path: str, config: PipelineConfig, cache_dir: str) -> bool:
+    """True only if all expected output channels are present in cache."""
+    channels = _expected_channels_for_file(wav_path, config)
+    return all(is_cached(wav_path, ch, cache_dir) for ch in channels)
+
 # ---------------------------------------------------------------------------
 # Stage 2: Analysis (placeholder for Phase 2)
 # ---------------------------------------------------------------------------
 
 def run_analyses(base_matrix: pd.DataFrame, config: PipelineConfig) -> dict:
-    """Stage 2: Run enabled analysis modules. (Phase 2 implementation.)"""
-    logger.info("Analysis stage not yet implemented (Phase 2)")
-    return {}
+    from seasound.analysis.registry import get_analysis
+
+    results = {}
+    analyses = config.analyses or {}
+
+    for name, entry in analyses.items():
+        if not isinstance(entry, dict) or not entry.get("enabled", False):
+            continue
+
+        module = get_analysis(name)
+        module_cfg = entry.get("config", {})
+        module.validate_config(module_cfg)
+
+        res = module.run(base_matrix, module_cfg, config.output.directory)
+        results[name] = {
+            "outputs": res.outputs,
+            "summary": res.summary,
+            "warnings": res.warnings,
+        }
+
+    if not results:
+        logger.info("No enabled analyses found in config")
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +392,7 @@ def write_manifest(
     """Write run_manifest.json alongside outputs."""
     manifest = {
         "seasound_version": seasound.__version__,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "elapsed_seconds": round(elapsed_s, 1),
         "n_input_files": len(input_files),
         "config_summary": {
@@ -404,7 +438,7 @@ def run_pipeline(config: PipelineConfig) -> None:
                 & (base_matrix.index <= clip_end)
             ]
 
-    if not config.ingest_only:
+    if not config.load_only:
         logger.info("=" * 60)
         logger.info("STAGE 2: ANALYSIS")
         logger.info("=" * 60)
@@ -477,7 +511,7 @@ def cli_main():
         raise SystemExit(1)
 
     # Apply runtime flags
-    config.ingest_only = args.ingest_only
+    config.load_only = args.load_only
     config.analyse_only = args.analyse_only
     config.dry_run = args.dry_run
 

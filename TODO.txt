@@ -1,4 +1,9 @@
+Long-term/general
+
 1. As Matt what he thinks of the config document - does it cover the analytical
     elements we need?
 2. Need to add an appropiate license after we have seen the M3B contract.
+3. Create an actual testing protocol with real data to verify reading/processing
+    is functional.
+
 
