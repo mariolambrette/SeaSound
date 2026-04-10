@@ -1,1 +1,3 @@
 code_guides/
+.pytest_cache/
+*__pycache__*
