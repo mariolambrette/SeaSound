@@ -34,6 +34,7 @@ from seasound.loader.cache import (
     load_all_cached,
 )
 from seasound.loader.filename_parsers import FilenameParser, get_parser
+from seasound.loader.metadata_readers import get_metadata_reader
 
 logger = logging.getLogger(__name__)
 
@@ -142,48 +143,20 @@ def get_clip_bounds(
 
 
 def _load_clip_from_metadata(config: PipelineConfig) -> tuple:
-    """
-    Load deployment/retrieval times from a metadata spreadsheet.
-
-    Expected columns: Station, Hydrophone,
-                      DateTime_deploy_UTC, DateTime_retrieve_UTC
-    """
-    try:
-        meta = pd.read_excel(config.deployment.metadata_file, dtype=str)
-    except Exception as exc:
-        raise SeaSoundError(
-            f"Could not read metadata file "
-            f"{config.deployment.metadata_file}: {exc}"
-        )
-
-    meta.columns = meta.columns.str.strip()
-
-    mask = (
-        (meta["Station"].str.strip().str.upper()
-         == config.deployment.station.upper())
-        & (meta["Hydrophone"].str.strip()
-           == str(config.deployment.hydrophone))
+    reader = get_metadata_reader(config.deployment)
+    window = reader.read(
+        config.deployment.metadata_file,
+        config.deployment.location_id,
+        config.deployment.hydrophone,
     )
-    matches = meta[mask]
-
-    if matches.empty:
-        raise SeaSoundError(
-            f"No metadata row for Station='{config.deployment.station}', "
-            f"Hydrophone='{config.deployment.hydrophone}'"
-        )
-
-    row = matches.iloc[0]
-    deploy = pd.to_datetime(row["DateTime_deploy_UTC"])
-    retrieve = pd.to_datetime(row["DateTime_retrieve_UTC"])
 
     buf = config.deployment.buffer_hours
-    clip_start = deploy + timedelta(hours=buf.deploy)
-    clip_end = retrieve - timedelta(hours=buf.retrieve)
+    clip_start = window.deploy_utc + timedelta(hours=buf.deploy)
+    clip_end = window.retrieve_utc - timedelta(hours=buf.retrieve)
 
     if clip_start >= clip_end:
         raise SeaSoundError(
-            f"Metadata clip window is empty after buffers: "
-            f"{clip_start} → {clip_end}"
+            f"Clip window is empty after buffers: {clip_start} → {clip_end}"
         )
 
     logger.info(f"Metadata clip window: {clip_start} → {clip_end}")

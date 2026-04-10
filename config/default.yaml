@@ -95,13 +95,18 @@ deployment:
     start: 1
     end: 1
 
-  # --- metadata method: lookup from spreadsheet ---
-  # metadata_file: "./data/MetaData.xlsx"
-  # station: "S21"
-  # hydrophone: "9471"
-  # buffer_hours for metadata uses deploy/retrieve:
-  #   deploy: 1
-  #   retrieve: 1
+  # --- metadata method ---
+  metadata_file: "./data/deployment_metadata.csv"
+  metadata_format: "seasound"      # "seasound" (CSV) or "excel" (custom columns)
+  location_id: "11"
+  hydrophone: "1111"
+
+  # Only needed when metadata_format is "excel":
+  # metadata_columns:
+  #   location_id: "Location_ID"
+  #   hydrophone: "Hydrophone"
+  #   deploy: "DateTime_deploy_UTC"
+  #   retrieve: "DateTime_retrieve_UTC"
 
 # -----------------------------------------------------------------------------
 # Output Options
@@ -114,9 +119,9 @@ output:
   overwrite: false
 
   # Output filename template. Available placeholders:
-  #   {station}, {hydrophone}, {analysis}, {params}, {ext}
+  #   {location_id}, {hydrophone}, {analysis}, {params}, {ext}
   # Falls back to input folder name if deployment config is disabled.
-  naming: "{station}_{hydrophone}_{analysis}_{params}"
+  naming: "{location_id}_{hydrophone}_{analysis}_{params}"
 
 # -----------------------------------------------------------------------------
 # Pipeline Options

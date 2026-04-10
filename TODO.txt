@@ -1,41 +1,4 @@
-2. While reading through the suggested default config file, I am unsure about
-    the clipping method you are suggesting, particuarly relying on user-
-    generated metadata excel sheets. Given the loaded files will have datetimes
-    embedded into the parquet files can they be trimmed directly at that level?
-    This might be handled in the subsequent implementation but I thought it was
-    worth flagging at this stage. Perhaps a standrd format metadata sheet could
-    be used? Overall this definitely needs attention and it might be best that
-    all clipping is handled directly by end users?
-3. What is the difference between the reference pressure and the reference
-    provided in the calibration file?
-4. As Matt what he thinks of the config document - does it cover the analytical
+1. As Matt what he thinks of the config document - does it cover the analytical
     elements we need?
-5. Need to add an appropiate license after we have seen the M3B contract.
-6. The documentation for the package needs to make clear that the environment
-    must currently be created form the rleevant environment file before the
-    package itself is installed wiht pip. Ideally this complication is eventually
-    removed. Do virtual environments solve this?
-7. How specific are we making the pipeline ot the SoundTrap recorders? For
-    example, what happens if the datetime and serial unmber of the device
-    are not encoded into the filename? I guess the _parse_custom function somewhat
-    supports this but maybe some more flexibility could be introduced? Also, 
-    perhaps the parsers could be moved into their own module and registered in
-    the reader module. This might make it more intuitive for a user to add a new
-    parser. Should these also perhaps be subclasses of a base parser class to
-    enforce return signatures? I may be misunderstanding the role of classes/
-    subclasses here.
-8. Automatically relying on the first column if there isn't a 'Serial' column in
-    the calibration file feels risky.
-9. Is there a risk that the calibration process as a whole is too reliant on a
-    specific configuration? What possible edge cases are there where it might
-    fail? Perhaps the best option here is also to have a registry of
-    calibration functions? My acoustics knowledge limits my ability to suggest 
-    the best way forward here.
-10. Can you explain the nyquist value calculated in the compute_base_matrix
-     function more clearly.
-11. The load_deployment_window function in the pipeline script also has the feel
-     of being a bit too project specific.
-12. We have in the past (for example when developing SeaVision) used classes
-     much more heavily, whereas SeaSound seems to rely classes very sparingly.
-     Is there a specific reason for this?
-    
+2. Need to add an appropiate license after we have seen the M3B contract.
+

@@ -87,7 +87,16 @@ class DeploymentConfig:
 
     # --- metadata method ---
     metadata_file: str = ""
-    station: str = ""
+    metadata_format: str = "seasound"   # NEW: "seasound" or "excel"
+    metadata_columns: dict = field(     # NEW: only used by "excel" format
+        default_factory=lambda: {
+            "location_id": "Location_ID",
+            "hydrophone": "Hydrophone",
+            "deploy": "DateTime_deploy_UTC",
+            "retrieve": "DateTime_retrieve_UTC",
+        }
+    )
+    location_id: str = ""
     hydrophone: str = ""
 
 
@@ -96,7 +105,7 @@ class OutputConfig:
     """Where and how outputs are written."""
     directory: str = "./output/"
     overwrite: bool = False
-    naming: str = "{station}_{hydrophone}_{analysis}_{params}"
+    naming: str = "{location_id}_{hydrophone}_{analysis}_{params}"
 
 
 @dataclass
@@ -319,9 +328,9 @@ def validate(raw: dict) -> PipelineConfig:
                     "deployment.metadata_file is required when "
                     "clip_method is 'metadata'"
                 )
-            if not config.deployment.station:
+            if not config.deployment.location_id:
                 errors.append(
-                    "deployment.station is required when "
+                    "deployment.location_id is required when "
                     "clip_method is 'metadata'"
                 )
 
