@@ -8,7 +8,6 @@ strategies. Returns AudioSegment objects ready for calibration.
 """
 
 import os
-import re
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,6 +23,7 @@ except ImportError:
 
 from seasound.core.config import InputConfig
 from seasound.core.exceptions import ReaderError
+from seasound.loader.filename_parsers import FilenameParser, get_parser
 
 logger = logging.getLogger(__name__)
 
@@ -68,175 +68,18 @@ class AudioSegment:
     channel: int
     source_file: str
 
-
-# ---------------------------------------------------------------------------
-# Filename parsers
-# ---------------------------------------------------------------------------
-
-def _parse_soundtrap(filename: str) -> tuple[Optional[str], Optional[datetime]]:
-    """
-    Parse SoundTrap filename: SERIAL.YYMMDDHHMMSS.wav
-    Example: 9471.251011103045.wav → serial="9471", datetime=2025-10-11 10:30:45
-
-    SoundTrap devices encode the serial number and recording start time
-    directly in the filename. The date uses 2-digit year format.
-    """
-    basename = os.path.basename(filename)
-    parts = basename.split(".")
-
-    if len(parts) < 3:
-        return None, None
-
-    serial = parts[0] if parts[0].isdigit() else None
-
-    try:
-        dt = datetime.strptime(parts[1], "%y%m%d%H%M%S")
-    except (ValueError, IndexError):
-        dt = None
-
-    return serial, dt
-
-
-def _parse_wildlife(filename: str) -> tuple[Optional[str], Optional[datetime]]:
-    """
-    Parse Wildlife Acoustics filename: PREFIX_YYYYMMDD_HHMMSS.wav
-    Example: SM4_20251011_103045.wav → serial="SM4", datetime=2025-10-11 10:30:45
-    """
-    basename = os.path.splitext(os.path.basename(filename))[0]
-    parts = basename.split("_")
-
-    if len(parts) < 3:
-        return None, None
-
-    serial = parts[0]
-
-    try:
-        dt = datetime.strptime(f"{parts[-2]}_{parts[-1]}", "%Y%m%d_%H%M%S")
-    except (ValueError, IndexError):
-        dt = None
-
-    return serial, dt
-
-
-def _parse_iclisten(filename: str) -> tuple[Optional[str], Optional[datetime]]:
-    """
-    Parse icListen filename: icListenHF_SERIAL_YYYYMMDD_HHMMSS.wav
-    Example: icListenHF_1234_20251011_103045.wav
-    """
-    basename = os.path.splitext(os.path.basename(filename))[0]
-    parts = basename.split("_")
-
-    if len(parts) < 4:
-        return None, None
-
-    serial = parts[1]
-
-    try:
-        dt = datetime.strptime(f"{parts[2]}_{parts[3]}", "%Y%m%d_%H%M%S")
-    except (ValueError, IndexError):
-        dt = None
-
-    return serial, dt
-
-
-def _parse_custom(
-    filename: str,
-    regex: str,
-    datetime_format: str,
-) -> tuple[Optional[str], Optional[datetime]]:
-    """
-    Parse filename using a user-supplied regex with named groups.
-
-    The regex must contain:
-        (?P<serial>...)    — captures the serial number
-        (?P<datetime>...)  — captures the datetime string
-
-    The datetime string is parsed with datetime_format (strptime syntax).
-    """
-    basename = os.path.basename(filename)
-    match = re.match(regex, basename)
-
-    if match is None:
-        return None, None
-
-    serial = match.group("serial") if "serial" in match.groupdict() else None
-
-    try:
-        dt_str = match.group("datetime")
-        dt = datetime.strptime(dt_str, datetime_format)
-    except (IndexError, ValueError, KeyError):
-        dt = None
-
-    return serial, dt
-
-
-def parse_filename(
-    filepath: str,
-    config: InputConfig,
-) -> tuple[Optional[str], Optional[datetime]]:
-    """
-    Dispatch to the appropriate filename parser based on config.
-
-    Parameters
-    ----------
-    filepath : str
-        Path to audio file.
-    config : InputConfig
-        Input configuration specifying filename_format.
-
-    Returns
-    -------
-    tuple of (serial, datetime)
-        Either or both may be None if parsing fails.
-    """
-    parsers = {
-        "soundtrap": _parse_soundtrap,
-        "wildlife": _parse_wildlife,
-        "iclisten": _parse_iclisten,
-    }
-
-    fmt = config.filename_format
-
-    if fmt == "custom":
-        if not config.custom_regex or not config.custom_datetime_format:
-            logger.warning(
-                "filename_format is 'custom' but custom_regex or "
-                "custom_datetime_format not set"
-            )
-            return None, None
-        return _parse_custom(
-            filepath, config.custom_regex, config.custom_datetime_format
-        )
-
-    parser = parsers.get(fmt)
-    if parser is None:
-        logger.warning(f"Unknown filename_format '{fmt}', cannot parse metadata")
-        return None, None
-
-    serial, dt = parser(filepath)
-
-    if serial is None:
-        logger.warning(f"Could not extract serial from {filepath}")
-    if dt is None:
-        logger.warning(f"Could not extract datetime from {filepath}")
-
-    return serial, dt
-
-
 # ---------------------------------------------------------------------------
 # Main reader
 # ---------------------------------------------------------------------------
 
 
-def read_audio(filepath: str, config: InputConfig) -> list[AudioSegment]:
+def read_audio(
+    filepath: str,
+    config: InputConfig,
+    parser: Optional[FilenameParser] = None,
+) -> list[AudioSegment]:
     """
     Read an audio file and return one AudioSegment per output channel.
-
-    This is the main entry point for the reader module. It:
-    1. Opens the file with soundfile
-    2. Extracts metadata from the filename
-    3. Applies the configured channel strategy
-    4. Returns a list of AudioSegment objects
 
     Parameters
     ----------
@@ -244,6 +87,10 @@ def read_audio(filepath: str, config: InputConfig) -> list[AudioSegment]:
         Path to the audio file.
     config : InputConfig
         Input configuration.
+    parser : FilenameParser, optional
+        Filename parser to extract metadata. If None, one is created
+        from the config (provided for efficiency when processing
+        many files — avoids re-instantiating the parser each time).
 
     Returns
     -------
@@ -264,15 +111,20 @@ def read_audio(filepath: str, config: InputConfig) -> list[AudioSegment]:
 
     if not os.path.isfile(filepath):
         raise ReaderError(f"File not found: {filepath}")
-    
+
     # --- Read the file ---
     try:
-        audio_data, sample_rate = sf.read(filepath, dtype="float64") # pyright: ignore[reportPossiblyUnboundVariable]
+        audio_data, sample_rate = sf.read(filepath, dtype="float64") # pyright: ignore[reportPossiblyUnboundVariable] - handled by import checks.
     except Exception as exc:
         raise ReaderError(f"Could not read {filepath}: {exc}")
-    
+
     # --- Extract metadata from filename ---
-    serial, dt_start = parse_filename(filepath, config)
+    if parser is None:
+        parser = get_parser(config)
+
+    metadata = parser.parse(filepath)
+    serial = metadata.serial
+    dt_start = metadata.datetime_start
 
     logger.info(
         f"Read {os.path.basename(filepath)}: "
@@ -285,7 +137,6 @@ def read_audio(filepath: str, config: InputConfig) -> list[AudioSegment]:
     strategy = config.channel_strategy
 
     if audio_data.ndim == 1:
-        # Already mono — return as-is regardless of strategy
         return [AudioSegment(
             data=audio_data,
             sample_rate=sample_rate,
@@ -298,7 +149,6 @@ def read_audio(filepath: str, config: InputConfig) -> list[AudioSegment]:
     n_channels = audio_data.shape[1]
 
     if strategy == "mono":
-        # Average all channels
         mono = np.mean(audio_data, axis=1)
         return [AudioSegment(
             data=mono,
@@ -325,7 +175,6 @@ def read_audio(filepath: str, config: InputConfig) -> list[AudioSegment]:
         )]
 
     elif strategy == "auto":
-        # Return one segment per channel
         segments = []
         for ch in range(n_channels):
             segments.append(AudioSegment(
@@ -343,6 +192,6 @@ def read_audio(filepath: str, config: InputConfig) -> list[AudioSegment]:
             "dual_gain channel strategy is planned for a future release. "
             "Use 'mono' or 'select' for now."
         )
-    
+
     else:
         raise ReaderError(f"Unknown channel_strategy: {strategy}")

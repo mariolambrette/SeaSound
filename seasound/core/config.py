@@ -34,10 +34,12 @@ class InputConfig:
     pattern: str = "*.wav"
     recursive: bool = True
     filename_format: str = "soundtrap"
-    channel_strategy: str = "auto"
+    channel_strategy: str = "mono"
     selected_channel: int = 0
     custom_regex: Optional[str] = None
     custom_datetime_format: Optional[str] = None
+    serial_override: Optional[str] = None
+    start_datetime: Optional[str] = None
 
 
 @dataclass
@@ -46,27 +48,47 @@ class CalibrationConfig:
     enabled: bool = True
     strict: bool = True
     file: str = "./data/SoundTrapCalibration.xlsx"
+    serial_column: str = "Serial"
     sensitivity_column: str = "High_Gain"
+    method: str = "soundtrap"
     vpp: float = 2.0
 
 
 @dataclass
-class BufferHoursConfig:
-    """Configuration for trimming deployment start/end."""
+class DeploymentBufferConfig:
+    start: float = 1.0
+    end: float = 1.0
+    # Legacy aliases for metadata method
     deploy: float = 1.0
     retrieve: float = 1.0
 
 
 @dataclass
 class DeploymentConfig:
-    """Configuration for trimming deployment start/end."""
+    """
+    Configuration for trimming deployment start/end.
+
+    Three clipping methods:
+      "manual"   — explicit start_utc / end_utc datetimes
+      "auto"     — trim N hours from data start/end
+      "metadata" — look up times from a metadata spreadsheet
+    """
     enabled: bool = False
+    clip_method: str = "manual"
+
+    # --- manual method ---
+    start_utc: Optional[str] = None
+    end_utc: Optional[str] = None
+
+    # --- auto method ---
+    buffer_hours: DeploymentBufferConfig = field(
+        default_factory=DeploymentBufferConfig
+    )
+
+    # --- metadata method ---
     metadata_file: str = ""
     station: str = ""
     hydrophone: str = ""
-    buffer_hours: BufferHoursConfig = field(
-        default_factory=BufferHoursConfig
-    )
 
 
 @dataclass
@@ -206,12 +228,24 @@ def validate(raw: dict) -> PipelineConfig:
             f"Create it or set the correct path."
         )
 
-    valid_formats = {"soundtrap", "wildlife", "iclisten", "custom"}
+    valid_formats = {"soundtrap", "wildlife", "iclisten", "custom", "manual"}
     if config.input.filename_format not in valid_formats:
         errors.append(
             f"input.filename_format '{config.input.filename_format}' "
             f"must be one of: {', '.join(sorted(valid_formats))}"
         )
+
+    if config.input.filename_format == "custom":
+        if not config.input.custom_regex:
+            errors.append(
+                "input.custom_regex is required when "
+                "filename_format is 'custom'"
+            )
+        if not config.input.custom_datetime_format:
+            errors.append(
+                "input.custom_datetime_format is required when "
+                "filename_format is 'custom'"
+            )
 
     valid_channels = {"mono", "auto", "select", "dual_gain"}
     if config.input.channel_strategy not in valid_channels:
@@ -230,6 +264,13 @@ def validate(raw: dict) -> PipelineConfig:
 
     if config.calibration.vpp <= 0:
         errors.append("calibration.vpp must be positive")
+
+    valid_cal_methods = {"soundtrap", "standard"}
+    if config.calibration.method not in valid_cal_methods:
+        errors.append(
+            f"calibration.method '{config.calibration.method}' "
+            f"must be one of: {', '.join(sorted(valid_cal_methods))}"
+        )
 
     # --- Pipeline validation ---
     if config.pipeline.base_resolution_s < 1:
@@ -252,14 +293,37 @@ def validate(raw: dict) -> PipelineConfig:
 
     # --- Deployment validation ---
     if config.deployment.enabled:
-        if not config.deployment.metadata_file:
+        valid_clip_methods = {"manual", "auto", "metadata"}
+        method = config.deployment.clip_method
+        if method not in valid_clip_methods:
             errors.append(
-                "deployment.metadata_file is required when deployment.enabled is true"
+                f"deployment.clip_method '{method}' must be one of: "
+                f"{', '.join(sorted(valid_clip_methods))}"
             )
-        if not config.deployment.station:
-            errors.append(
-                "deployment.station is required when deployment.enabled is true"
-            )
+
+        if method == "manual":
+            if not config.deployment.start_utc:
+                errors.append(
+                    "deployment.start_utc is required when "
+                    "clip_method is 'manual'"
+                )
+            if not config.deployment.end_utc:
+                errors.append(
+                    "deployment.end_utc is required when "
+                    "clip_method is 'manual'"
+                )
+
+        if method == "metadata":
+            if not config.deployment.metadata_file:
+                errors.append(
+                    "deployment.metadata_file is required when "
+                    "clip_method is 'metadata'"
+                )
+            if not config.deployment.station:
+                errors.append(
+                    "deployment.station is required when "
+                    "clip_method is 'metadata'"
+                )
 
     # --- Raise all errors at once ---
     if errors:
@@ -271,7 +335,7 @@ def validate(raw: dict) -> PipelineConfig:
 
 def load_config(
     config_path: str,
-    cli_overrides: dict = None,
+    cli_overrides: Optional[dict] = None,
 ) -> PipelineConfig:
     """
     Public API: load YAML, merge CLI overrides, validate, return typed config.

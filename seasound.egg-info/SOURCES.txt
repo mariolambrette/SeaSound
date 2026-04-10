@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 seasound/__init__.py
 seasound.egg-info/PKG-INFO
@@ -16,6 +17,8 @@ seasound/loader/__init__.py
 seasound/loader/base_matrix.py
 seasound/loader/cache.py
 seasound/loader/calibration.py
+seasound/loader/calibration_methods.py
+seasound/loader/filename_parsers.py
 seasound/loader/reader.py
 seasound/utils/__init__.py
 seasound/utils/spectral.py

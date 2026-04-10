@@ -5,6 +5,11 @@ import pytest
 from seasound.loader.calibration import load_calibration, apply_calibration
 from seasound.loader.reader import AudioSegment
 from seasound.core.config import CalibrationConfig
+from seasound.loader.calibration_methods import (
+    SoundTrapMethod,
+    StandardMethod,
+    get_calibration_method,
+)
 
 
 class TestLoadCalibration:
@@ -13,7 +18,9 @@ class TestLoadCalibration:
         config = CalibrationConfig(
             enabled=True, strict=True,
             file=sample_calibration_file,
+            serial_column="Serial",
             sensitivity_column="High_Gain",
+            method="soundtrap",
         )
         cal_df = load_calibration(config)
         assert cal_df is not None
@@ -27,33 +34,28 @@ class TestLoadCalibration:
 
 class TestApplyCalibration:
 
-    def test_known_sensitivity(self, sample_calibration_file):
+    def test_known_sensitivity_standard(self, sample_calibration_file):
         """
-        With sensitivity = -176 dB, the linear factor is 10^(-176/20).
-        A sample value of 1.0 should produce:
-            1.0 * 10^(-176/20) µPa = 1.585e-9 µPa = 1.585e-15 Pa
+        Standard method: samples → volts → µPa → Pa.
 
-        Wait — that's incredibly small. Let's think about this more carefully.
-
-        Actually for SoundTrap: wav * 10^(cal/20) = µPa
-        cal = -176, so 10^(-176/20) = 10^(-8.8) ≈ 1.585e-9
-        wav=1.0 → 1.585e-9 µPa → 1.585e-15 Pa
-
-        This is correct! A normalised sample of 1.0 at full scale corresponds
-        to a very small pressure because the hydrophone is very sensitive.
-        The full-scale voltage represents a small physical signal.
+        With sensitivity = -176 dB, vpp = 2.0:
+            volts = 1.0 × (2.0 / 2) = 1.0
+            sensitivity_linear = 10^(-176/20) ≈ 1.585e-9
+            µPa = 1.0 / 1.585e-9 ≈ 6.31e8
+            Pa = 6.31e8 × 1e-6 = 630.96
         """
         config = CalibrationConfig(
             enabled=True, strict=True,
             file=sample_calibration_file,
+            serial_column="Serial",
             sensitivity_column="High_Gain",
+            method="standard",
             vpp=2.0,
         )
         cal_df = load_calibration(config)
 
-        # Create a simple test segment
         segment = AudioSegment(
-            data=np.array([1.0, -1.0, 0.5]),
+            data=np.array([1.0]),
             sample_rate=96000,
             serial="9999",
             datetime_start=None,
@@ -64,9 +66,50 @@ class TestApplyCalibration:
         audio_pa, calibrated = apply_calibration(segment, cal_df, config)
         assert calibrated is True
 
-        # Check the conversion
-        cal_linear = 10 ** (-176.0 / 20.0)
-        expected_upa = np.array([1.0, -1.0, 0.5]) * cal_linear
-        expected_pa = expected_upa * 1e-6
+        # Manual calculation
+        volts = 1.0 * (2.0 / 2.0)
+        sens_linear = 10 ** (-176.0 / 20.0)
+        expected_pa = (volts / sens_linear) * 1e-6
 
-        np.testing.assert_allclose(audio_pa, expected_pa, rtol=1e-10)
+        np.testing.assert_allclose(audio_pa, [expected_pa], rtol=1e-10)
+
+
+class TestCalibrationMethods:
+    """Test calibration method classes directly."""
+
+    def test_soundtrap_method(self):
+        method = SoundTrapMethod()
+        samples = np.array([1.0, 0.0, -1.0])
+        result = method.to_pascals(samples, -176.0, vpp=2.0)
+        cal_lin = 10 ** (-176.0 / 20.0)
+        expected = samples * cal_lin * 1e-6
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
+    def test_standard_method(self):
+        method = StandardMethod()
+        samples = np.array([1.0])
+        result = method.to_pascals(samples, -176.0, vpp=2.0)
+        volts = 1.0 * 1.0  # vpp/2
+        sens_lin = 10 ** (-176.0 / 20.0)
+        expected = (volts / sens_lin) * 1e-6
+        np.testing.assert_allclose(result, [expected], rtol=1e-10)
+
+    def test_soundtrap_ignores_vpp(self):
+        """SoundTrap method should give same result regardless of vpp."""
+        method = SoundTrapMethod()
+        samples = np.array([0.5])
+        result_a = method.to_pascals(samples, -176.0, vpp=2.0)
+        result_b = method.to_pascals(samples, -176.0, vpp=5.0)
+        np.testing.assert_allclose(result_a, result_b)
+
+    def test_standard_depends_on_vpp(self):
+        """Standard method output should scale with vpp."""
+        method = StandardMethod()
+        samples = np.array([1.0])
+        result_2v = method.to_pascals(samples, -176.0, vpp=2.0)
+        result_4v = method.to_pascals(samples, -176.0, vpp=4.0)
+        np.testing.assert_allclose(result_4v, result_2v * 2.0, rtol=1e-10)
+
+    def test_get_calibration_method_unknown(self):
+        with pytest.raises(ValueError):
+            get_calibration_method("nonexistent")

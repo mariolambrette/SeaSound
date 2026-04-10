@@ -26,25 +26,20 @@ input:
   recursive: true
 
   # Filename parsing strategy:
-  #   "soundtrap"  — expects SERIAL.YYMMDDHHMMSS.wav
-  #   "wildlife"   — expects PREFIX_YYYYMMDD_HHMMSS.wav
-  #   "iclisten"   — expects icListenHF_SERIAL_YYYYMMDD_HHMMSS.wav
-  #   "custom"     — uses custom_regex below
+  #   "soundtrap"  — SERIAL.YYMMDDHHMMSS.wav
+  #   "wildlife"   — PREFIX_YYYYMMDD_HHMMSS.wav
+  #   "iclisten"   — icListenHF_SERIAL_YYYYMMDD_HHMMSS.wav
+  #   "custom"     — uses custom_regex and custom_datetime_format below
+  #   "manual"     — uses serial_override and start_datetime below
   filename_format: "soundtrap"
 
-  # Only used when filename_format is "custom".
-  # Must contain named groups: (?P<serial>...) and (?P<datetime>...)
-  # The datetime group is parsed with datetime_strptime_format below.
+  # Only used when filename_format is "custom":
   # custom_regex: "(?P<serial>\\d+)\\.(?P<datetime>\\d{12})\\.wav"
   # custom_datetime_format: "%y%m%d%H%M%S"
 
-  # Multi-channel handling:
-  #   "auto"       — detect channels, produce separate output for each
-  #   "mono"       — average all channels to mono
-  #   "select"     — use only selected_channel (0-indexed)
-  #   "dual_gain"  — SoundTrap ST600: merge high/low gain channels
-  channel_strategy: "auto"
-  selected_channel: 0
+  # Only used when filename_format is "manual":
+  # serial_override: "9471"
+  # start_datetime: "2025-10-11 12:00:00"
 
 # -----------------------------------------------------------------------------
 # Calibration
@@ -61,30 +56,52 @@ calibration:
   # Path to calibration spreadsheet (Excel .xlsx)
   file: "./data/SoundTrapCalibration.xlsx"
 
+  # The column name containing the hydrophone serial numbers
+  serial_column: "Serial"
+
   # Column name in the spreadsheet containing sensitivity values.
   # The spreadsheet must also have a column parseable as serial number.
   sensitivity_column: "High_Gain"
 
+  # Calibration method — determines how sensitivity values are interpreted:
+  #   "soundtrap"  — SoundTrap end-to-end: samples × 10^(cal/20) = µPa
+  #   "standard"   — Standard receive sensitivity (dB re 1 V/µPa):
+  #                   samples → volts (via Vpp) → µPa → Pa
+  method: "soundtrap"
+
   # Peak-to-peak voltage of the recording system (volts)
   vpp: 2.0
 
-# -----------------------------------------------------------------------------
-# Deployment Clipping (optional)
-# -----------------------------------------------------------------------------
-# Trim the start and end of the recording to remove handling noise
-# from deployment and retrieval. Currently can trim a fixed time period
-# (in hours) from the start and end of each deplyoment
+# ---------------------------------------------------------------------------
+# Deployment clipping (optional)
+# ---------------------------------------------------------------------------
+# Trim the start and end of the recording to remove handling noise.
+# Three methods available:
+#
+#   "manual"   — specify exact start/end datetimes
+#   "auto"     — trim N hours from the first and last timestamps in the data
+#   "metadata" — look up deploy/retrieve times from a metadata spreadsheet
+#
 deployment:
   enabled: false
+  clip_method: "manual"   # "manual", "auto", or "metadata"
 
-  metadata_file: "./data/MetaData.xlsx"
-  station: "S1"
-  hydrophone: "1111"
+  # --- manual method: explicit datetime bounds ---
+  # start_utc: "2025-10-11 13:00:00"
+  # end_utc: "2026-01-15 11:00:00"
 
-  # Hours to clip from each end
+  # --- auto method: trim from data edges ---
   buffer_hours:
-    deploy: 1
-    retrieve: 1
+    start: 1
+    end: 1
+
+  # --- metadata method: lookup from spreadsheet ---
+  # metadata_file: "./data/MetaData.xlsx"
+  # station: "S21"
+  # hydrophone: "9471"
+  # buffer_hours for metadata uses deploy/retrieve:
+  #   deploy: 1
+  #   retrieve: 1
 
 # -----------------------------------------------------------------------------
 # Output Options

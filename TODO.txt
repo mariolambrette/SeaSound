@@ -1,6 +1,3 @@
-1. We currently run ht epipeline with the python run_pipeline.py signature.
-    Given that SeaSound will ship as a python package, can this be abstracted
-    to a specific CLI command (e.g. seasound-process --args ...)
 2. While reading through the suggested default config file, I am unsure about
     the clipping method you are suggesting, particuarly relying on user-
     generated metadata excel sheets. Given the loaded files will have datetimes

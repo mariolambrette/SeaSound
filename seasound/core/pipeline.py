@@ -15,6 +15,7 @@ import time as time_module
 from datetime import datetime, timedelta
 from multiprocessing import Pool, cpu_count
 from functools import partial
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,7 @@ from seasound.loader.cache import (
     load_base_matrix,
     load_all_cached,
 )
+from seasound.loader.filename_parsers import FilenameParser, get_parser
 
 logger = logging.getLogger(__name__)
 
@@ -62,21 +64,105 @@ def find_audio_files(config: PipelineConfig) -> list[str]:
 # Deployment clipping
 # ---------------------------------------------------------------------------
 
-def load_deployment_window(config: PipelineConfig):
+def get_clip_bounds(
+    config: PipelineConfig,
+    matrix: pd.DataFrame | None = None,
+) -> tuple:
     """
-    Load deployment/retrieval times from metadata and compute clip bounds.
+    Determine temporal clip bounds based on the configured method.
 
-    Returns (clip_start, clip_end) or (None, None) if disabled.
+    Parameters
+    ----------
+    config : PipelineConfig
+    matrix : pd.DataFrame, optional
+        The base matrix (needed for "auto" method).
+
+    Returns
+    -------
+    tuple of (clip_start, clip_end) or (None, None) if disabled.
     """
     if not config.deployment.enabled:
         return None, None
 
-    meta = pd.read_excel(config.deployment.metadata_file, dtype=str)
+    method = config.deployment.clip_method
+
+    if method == "manual":
+        start_raw = config.deployment.start_utc
+        end_raw = config.deployment.end_utc
+
+        if start_raw is None or end_raw is None:
+            raise SeaSoundError(
+                "Manual clip method requires both 'start_utc' and 'end_utc'."
+            )
+
+        try:
+            clip_start = pd.Timestamp(start_raw)
+            clip_end = pd.Timestamp(end_raw)
+        except Exception as exc:
+            raise SeaSoundError(
+                f"Could not parse deployment datetimes: {exc}. "
+                f"Use format: YYYY-MM-DD HH:MM:SS"
+            )
+
+        if clip_start >= clip_end:
+            raise SeaSoundError(
+                f"Deployment start ({clip_start}) must be before "
+                f"end ({clip_end})"
+            )
+
+        logger.info(f"Manual clip window: {clip_start} → {clip_end}")
+        return clip_start, clip_end
+
+    elif method == "auto":
+        if matrix is None or matrix.empty:
+            raise SeaSoundError(
+                "'auto' clip method requires a non-empty base matrix. "
+                "This usually means no data was loaded."
+            )
+
+        buf = config.deployment.buffer_hours
+        clip_start = matrix.index.min() + timedelta(hours=buf.start)
+        clip_end = matrix.index.max() - timedelta(hours=buf.end)
+
+        if clip_start >= clip_end:
+            raise SeaSoundError(
+                f"Auto clip window is empty after trimming "
+                f"{buf.start}h from start and {buf.end}h from end. "
+                f"Data spans {matrix.index.min()} → {matrix.index.max()}"
+            )
+
+        logger.info(f"Auto clip window: {clip_start} → {clip_end}")
+        return clip_start, clip_end
+
+    elif method == "metadata":
+        return _load_clip_from_metadata(config)
+
+    else:
+        raise SeaSoundError(f"Unknown clip_method: {method}")
+
+
+def _load_clip_from_metadata(config: PipelineConfig) -> tuple:
+    """
+    Load deployment/retrieval times from a metadata spreadsheet.
+
+    Expected columns: Station, Hydrophone,
+                      DateTime_deploy_UTC, DateTime_retrieve_UTC
+    """
+    try:
+        meta = pd.read_excel(config.deployment.metadata_file, dtype=str)
+    except Exception as exc:
+        raise SeaSoundError(
+            f"Could not read metadata file "
+            f"{config.deployment.metadata_file}: {exc}"
+        )
+
     meta.columns = meta.columns.str.strip()
 
     mask = (
-        (meta["Station"].str.strip().str.upper() == config.deployment.station.upper())
-        & (meta["Hydrophone"].str.strip() == str(config.deployment.hydrophone))
+        (meta["Station"].str.strip().str.upper()
+         == config.deployment.station.upper())
+        & (meta["Hydrophone"].str.strip()
+           == str(config.deployment.hydrophone))
     )
     matches = meta[mask]
 
@@ -90,10 +176,17 @@ def load_deployment_window(config: PipelineConfig):
     deploy = pd.to_datetime(row["DateTime_deploy_UTC"])
     retrieve = pd.to_datetime(row["DateTime_retrieve_UTC"])
 
-    clip_start = deploy + timedelta(hours=config.deployment.buffer_hours.deploy)
-    clip_end = retrieve - timedelta(hours=config.deployment.buffer_hours.retrieve)
+    buf = config.deployment.buffer_hours
+    clip_start = deploy + timedelta(hours=buf.deploy)
+    clip_end = retrieve - timedelta(hours=buf.retrieve)
 
-    logger.info(f"Deployment window: {clip_start} → {clip_end}")
+    if clip_start >= clip_end:
+        raise SeaSoundError(
+            f"Metadata clip window is empty after buffers: "
+            f"{clip_start} → {clip_end}"
+        )
+
+    logger.info(f"Metadata clip window: {clip_start} → {clip_end}")
     return clip_start, clip_end
 
 
@@ -104,27 +197,25 @@ def load_deployment_window(config: PipelineConfig):
 def _process_one_file(
     wav_path: str,
     config: PipelineConfig,
-    cal_df: pd.DataFrame,
+    cal_df: Optional[pd.DataFrame],
     cache_dir: str,
+    parser: Optional[FilenameParser] = None,
 ) -> list[str]:
     """
     Process a single WAV file: read → calibrate → compute matrix → cache.
 
     Returns list of Parquet paths created.
     """
-    segments = read_audio(wav_path, config.input)
+    segments = read_audio(wav_path, config.input, parser=parser)
     parquet_paths = []
 
     for segment in segments:
-        # Apply calibration
         audio_pa, calibrated = apply_calibration(
             segment, cal_df, config.calibration
         )
 
-        # Compute base matrix
         matrix = compute_base_matrix(audio_pa, segment.sample_rate, config.pipeline)
 
-        # Cache to Parquet
         if config.pipeline.cache_base_matrix:
             path = save_base_matrix(matrix, segment, calibrated, cache_dir)
             parquet_paths.append(path)
@@ -135,9 +226,11 @@ def _process_one_file(
 def _worker_fn(args):
     """Wrapper for multiprocessing (can't pickle lambdas)."""
     wav_path, config, cal_df, cache_dir = args
+    # Create parser inside each worker (parser objects may not be picklable)
+    parser = get_parser(config.input)
     t0 = time_module.time()
     try:
-        paths = _process_one_file(wav_path, config, cal_df, cache_dir)
+        paths = _process_one_file(wav_path, config, cal_df, cache_dir, parser)
         return True, time_module.time() - t0, paths
     except Exception as exc:
         logger.error(f"Error processing {wav_path}: {exc}")
@@ -205,10 +298,16 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
 
         if n_workers == 1 or total == 1:
             # Serial processing (easier to debug)
+            parser = get_parser(config.input)
             for i, wav_file in enumerate(files_to_process, 1):
-                success, dur, _ = _worker_fn(
-                    (wav_file, config, cal_df, cache_dir)
-                )
+                t0 = time_module.time()
+                try:
+                    _process_one_file(wav_file, config, cal_df, cache_dir, parser)
+                    success = True
+                except Exception as exc:
+                    logger.error(f"Error processing {wav_file}: {exc}")
+                    success = False
+                dur = time_module.time() - t0
                 completed += 1
                 successes += int(success)
                 durations.append(dur)
@@ -251,7 +350,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
     full_matrix = load_all_cached(cache_dir)
 
     # Clip to deployment window
-    clip_start, clip_end = load_deployment_window(config)
+    clip_start, clip_end = get_clip_bounds(config, full_matrix)
     if clip_start is not None:
         before = len(full_matrix)
         full_matrix = full_matrix.loc[
@@ -325,7 +424,7 @@ def run_pipeline(config: PipelineConfig) -> None:
         base_matrix = load_all_cached(cache_dir)
 
         # Clip
-        clip_start, clip_end = load_deployment_window(config)
+        clip_start, clip_end = get_clip_bounds(config, base_matrix)
         if clip_start is not None:
             base_matrix = base_matrix.loc[
                 (base_matrix.index >= clip_start)

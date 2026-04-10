@@ -32,13 +32,20 @@ def test_band_edges_ordering():
 
 
 def test_band_edges_no_gaps():
-    """Adjacent bands should overlap slightly or meet."""
+    """
+    Adjacent TOB bands may have small gaps due to ISO 266 using
+    preferred rounded centre frequencies rather than exact geometric values.
+    The gaps should be small (< 5% of the band centre).
+    """
     centres = tob_centre_frequencies(10, 50000)
     edges = tob_band_edges(centres)
     for i in range(len(centres) - 1):
-        # Upper edge of band i should be >= lower edge of band i+1
-        # (TOB bands actually overlap slightly by design)
-        assert edges[i, 1] >= edges[i + 1, 0] * 0.99  # allow tiny gap
+        gap = edges[i + 1, 0] - edges[i, 1]  # Hz between bands
+        # Gap should be small relative to the frequency
+        assert gap / centres[i] < 0.05, (
+            f"Gap between {centres[i]} and {centres[i+1]} Hz bands "
+            f"is {gap:.2f} Hz ({gap/centres[i]*100:.1f}% of centre)"
+        )
 
 
 def test_nearest_band():

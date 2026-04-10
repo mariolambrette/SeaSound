@@ -19,6 +19,7 @@ import pandas as pd
 from seasound.core.config import CalibrationConfig
 from seasound.core.exceptions import CalibrationError
 from seasound.loader.reader import AudioSegment
+from seasound.loader.calibration_methods import get_calibration_method
 
 logger = logging.getLogger(__name__)
 
@@ -66,15 +67,19 @@ def load_calibration(config: CalibrationConfig) -> Optional[pd.DataFrame]:
         return None
     
     # --- Identify serial column ---
-    if "Serial" in df.columns:
-        serial_col = "Serial"
-    else:
-        # Assume first column is serial
-        serial_col = df.columns[0]
-        logger.info(
-            f"No 'Serial' column found; using first column '{serial_col}' "
-            f"as serial number"
+    serial_col = config.serial_column
+
+    if serial_col not in df.columns:
+        msg = (
+            f"Serial column '{serial_col}' not found in {config.file}. "
+            f"Available columns: {', '.join(df.columns.tolist())}. "
+            f"Set calibration.serial_column in your config to match "
+            f"the column containing hydrophone serial numbers."
         )
+        if config.strict:
+            raise CalibrationError(msg)
+        logger.warning(msg)
+        return None
 
     df[serial_col] = df[serial_col].astype(str).str.strip()
     df = df.set_index(serial_col)
@@ -195,7 +200,7 @@ def apply_calibration(
     # --- Get sensitivity value ---
     sens_col = config.sensitivity_column
     try:
-        sens_db = float(cal_df.loc[serial_str, sens_col])
+        sens_db = float(cal_df.loc[serial_str, sens_col]) # pyright: ignore[reportArgumentType]
     except (KeyError, TypeError, ValueError) as exc:
         msg = f"Could not read {sens_col} for serial {serial_str}: {exc}"
         if config.strict:
@@ -210,16 +215,24 @@ def apply_calibration(
         logger.warning(msg)
         return segment.data, False
 
-    # --- Apply conversion ---
-    # SoundTrap convention: wav_samples * 10^(cal/20) = µPa
-    cal_linear = 10.0 ** (sens_db / 20.0)
-    pressure_upa = segment.data * cal_linear
-    pressure_pa = pressure_upa * 1e-6
+    # --- Apply conversion using configured method ---
+    try:
+        method = get_calibration_method(config.method)
+    except ValueError as exc:
+        msg = str(exc)
+        if config.strict:
+            raise CalibrationError(msg)
+        logger.warning(msg)
+        return segment.data, False
+
+    pressure_pa = method.to_pascals(segment.data, sens_db, config.vpp)
 
     logger.debug(
         f"Calibration applied: serial={serial_str}, "
-        f"sensitivity={sens_db:.1f} dB, "
-        f"linear factor={cal_linear:.4e}"
+        f"method={config.method}, "
+        f"sensitivity={sens_db:.1f} dB"
     )
+
+    return pressure_pa, True
 
     return pressure_pa, True
