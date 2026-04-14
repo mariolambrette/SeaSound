@@ -183,6 +183,46 @@ pipeline:
   # Default: a ".cache/" subdirectory of the output directory.
   # cache_directory: "./output/.cache/"
 
+  # --- Optional LInear STFT parameters ---
+  
+  # Persist computed STFT to .npz cache files for re-use across analysis runs.
+  # false = compute on demand each time (no disk overhead, recommended default)
+  # true  = write/read .npz files in the cache directory
+  stft_cache_enabled: false
+
+  # Analysis window size (samples). Controls the time/frequency resolution
+  # trade-off: larger = finer frequency resolution, coarser time resolution.
+  # At 96 kHz: 2048 samples ≈ 21 ms window → ~47 Hz frequency resolution.
+  stft_win_length: 2048
+
+  # FFT size (samples). Must be >= stft_win_length. When equal, no
+  # zero-padding is applied (recommended). Set larger (e.g. 4096) to
+  # interpolate between frequency bins for a smoother spectrum display,
+  # without improving the true frequency resolution.
+  stft_nfft: 2048
+
+  # Hop size between successive windows (samples). Controls time-step between
+  # STFT frames. 50% overlap (hop = win_length / 2) is a standard choice.
+  # Smaller hop = more frames, finer temporal resolution, larger output.
+  stft_hop_length: 1024
+
+  # Window function applied to each frame before the FFT.
+  # "hann" is strongly recommended — it minimises spectral leakage.
+  # Other options: "hamming", "blackman", "boxcar" (no window).
+  stft_window: "hann"
+
+  # Frequency range to retain after computing the full FFT (Hz).
+  # Bins outside [stft_fmin_hz, stft_fmax_hz] are discarded, reducing
+  # memory and storage when only a sub-band is needed.
+  stft_fmin_hz: 10.0
+  stft_fmax_hz: 50000.0
+
+  # Numeric precision for stored/computed STFT power arrays.
+  # "float32" — 4 bytes/value, sufficient for most acoustic analysis.
+  # "float16" — 2 bytes/value, halves storage at the cost of precision.
+  stft_dtype: "float32"
+
+
 # -----------------------------------------------------------------------------
 # Analyses
 # -----------------------------------------------------------------------------

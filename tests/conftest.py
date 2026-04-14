@@ -141,6 +141,14 @@ def test_config(tmp_path, sample_calibration_file):
             reference_pressure_pa=1e-6,
             missing_band_strategy="nan",
             cache_base_matrix=True,
+            stft_cache_enabled=False,
+            stft_nfft=2048,
+            stft_win_length=2048,
+            stft_hop_length=1024,
+            stft_window="hann",
+            stft_fmin_hz=10.0,
+            stft_fmax_hz=50000.0,
+            stft_dtype="float32",
         ),
     )
 

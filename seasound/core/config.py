@@ -123,6 +123,16 @@ class ProcessingConfig:
     cache_base_matrix: bool = True
     cache_directory: Optional[str] = None
 
+    # Optional linear STFT support
+    stft_cache_enabled: bool = False
+    stft_nfft: int = 2048
+    stft_win_length: int = 2048
+    stft_hop_length: int = 1024
+    stft_window: str = "hann"
+    stft_fmin_hz: float = 10.0
+    stft_fmax_hz: float = 50000.0
+    stft_dtype: str = "float32"    # "float32" | "float16"
+
 
 @dataclass
 class PipelineConfig:
@@ -263,6 +273,16 @@ def validate(raw: dict) -> PipelineConfig:
             f"input.channel_strategy '{config.input.channel_strategy}' "
             f"must be one of: {', '.join(sorted(valid_channels))}"
         )
+
+    # --- STFT validation ---
+    if config.pipeline.stft_win_length > config.pipeline.stft_nfft:
+        errors.append("pipeline.stft_win_length must be <= pipeline.stft_nfft")
+
+    if config.pipeline.stft_hop_length > config.pipeline.stft_win_length:
+        errors.append("pipeline.stft_hop_length must be <= pipeline.stft_win_length")
+
+    if config.pipeline.stft_fmin_hz >= config.pipeline.stft_fmax_hz:
+        errors.append("pipeline.stft_fmin_hz must be < pipeline.stft_fmax_hz")
 
     # --- Calibration validation ---
     if config.calibration.enabled and config.calibration.strict:

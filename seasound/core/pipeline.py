@@ -32,9 +32,11 @@ from seasound.loader.cache import (
     save_base_matrix,
     load_base_matrix,
     load_all_cached,
+    load_cached_for_sources,
 )
 from seasound.loader.filename_parsers import FilenameParser, get_parser
 from seasound.loader.metadata_readers import get_metadata_reader
+from seasound.loader.loaded_artifacts import SegmentArtifact, LoadingOutput
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +165,16 @@ def _load_clip_from_metadata(config: PipelineConfig) -> tuple[pd.Timestamp, pd.T
     )
     return pd.Timestamp(window.deploy_utc), pd.Timestamp(window.retrieve_utc)
 
+
+def _merge_base_matrices(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Merge base matrices deterministically."""
+    if not frames:
+        return pd.DataFrame()
+    full = pd.concat(frames).sort_index()
+    full = full[~full.index.duplicated(keep="first")]
+    return full
+
+
 # ---------------------------------------------------------------------------
 # Single-file processing (used by both serial and parallel modes)
 # ---------------------------------------------------------------------------
@@ -173,27 +185,40 @@ def _process_one_file(
     cal_df: Optional[pd.DataFrame],
     cache_dir: str,
     parser: Optional[FilenameParser] = None,
-) -> list[str]:
+) -> list[SegmentArtifact]:
     """
-    Process a single WAV file: read → calibrate → compute matrix → cache.
+    Process a single WAV file: read → calibrate → compute matrix.
 
-    Returns list of Parquet paths created.
+    Cache writes are optional side effects.
+    Returns in-memory artifacts regardless of cache mode.
     """
     segments = read_audio(wav_path, config.input, parser=parser)
-    parquet_paths = []
+    artifacts: list[SegmentArtifact] = []
 
     for segment in segments:
         audio_pa, calibrated = apply_calibration(
             segment, cal_df, config.calibration
         )
-
         matrix = compute_base_matrix(audio_pa, segment.sample_rate, config.pipeline)
 
+        cache_paths: list[str] = []
         if config.pipeline.cache_base_matrix:
             path = save_base_matrix(matrix, segment, calibrated, cache_dir)
-            parquet_paths.append(path)
+            cache_paths.append(path)
 
-    return parquet_paths
+        artifacts.append(
+            SegmentArtifact(
+                source_file=segment.source_file,
+                channel=segment.channel,
+                serial=segment.serial,
+                datetime_start=segment.datetime_start,
+                calibrated=calibrated,
+                base_matrix=matrix,
+                cache_paths=cache_paths,
+            )
+        )
+
+    return artifacts
 
 
 def _worker_fn(args):
@@ -203,8 +228,8 @@ def _worker_fn(args):
     parser = get_parser(config.input)
     t0 = time_module.time()
     try:
-        paths = _process_one_file(wav_path, config, cal_df, cache_dir, parser)
-        return True, time_module.time() - t0, paths
+        artifacts = _process_one_file(wav_path, config, cal_df, cache_dir, parser)
+        return True, time_module.time() - t0, artifacts
     except Exception as exc:
         logger.error(f"Error processing {wav_path}: {exc}")
         return False, time_module.time() - t0, []
@@ -238,19 +263,23 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
 
     # Filter already-cached files if resume=True
     if config.pipeline.resume:
-        uncached = [
+        files_to_process = [
             f for f in wav_files
             if not _is_fully_cached(f, config, cache_dir)
         ]
-        n_skipped = len(wav_files) - len(uncached)
+        files_to_process_set = set(files_to_process)
+        skipped_files = [f for f in wav_files if f not in files_to_process_set]
+        n_skipped = len(skipped_files)
         if n_skipped > 0:
             logger.info(f"Resuming: skipping {n_skipped} fully-cached file(s)")
-        files_to_process = uncached
     else:
         files_to_process = wav_files
+        skipped_files = []
 
     # Load calibration
     cal_df = load_calibration(config.calibration)
+
+    load_outputs: list[SegmentArtifact] = []
 
     # Process files
     total = len(files_to_process)
@@ -275,7 +304,8 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
             for i, wav_file in enumerate(files_to_process, 1):
                 t0 = time_module.time()
                 try:
-                    _process_one_file(wav_file, config, cal_df, cache_dir, parser)
+                    artifacts = _process_one_file(wav_file, config, cal_df, cache_dir, parser)
+                    load_outputs.extend(artifacts)
                     success = True
                 except Exception as exc:
                     logger.error(f"Error processing {wav_file}: {exc}")
@@ -300,7 +330,10 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
                 (f, config, cal_df, cache_dir) for f in files_to_process
             ]
             with Pool(n_workers) as pool:
-                for success, dur, _ in pool.imap_unordered(_worker_fn, args):
+                for success, dur, artifacts in pool.imap_unordered(_worker_fn, args):
+                    
+                    load_outputs.extend(artifacts)
+
                     completed += 1
                     successes += int(success)
                     durations.append(dur)
@@ -319,8 +352,17 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         )
 
     # Load all cached matrices (including previously cached ones)
-    logger.info("Loading cached base matrices…")
-    full_matrix = load_all_cached(cache_dir)
+    in_memory_frames = [a.base_matrix for a in load_outputs]
+    full_matrix = _merge_base_matrices(in_memory_frames)
+
+    if skipped_files:
+        skipped_basenames = {os.path.basename(p) for p in skipped_files}
+        skipped_cached = load_cached_for_sources(cache_dir, skipped_basenames)
+        if not skipped_cached.empty:
+            full_matrix = _merge_base_matrices([full_matrix, skipped_cached])
+
+    if full_matrix.empty:
+        raise SeaSoundError("No base matrix rows available after Stage 1 processing")
 
     # Clip to deployment window
     clip_start, clip_end = get_clip_bounds(config, full_matrix)

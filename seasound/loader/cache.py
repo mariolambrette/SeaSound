@@ -173,3 +173,70 @@ def load_all_cached(cache_dir: str) -> pd.DataFrame:
         f"{full.index.min()} → {full.index.max()}"
     )
     return full
+
+
+def load_cached_for_sources(
+    cache_dir: str,
+    source_basenames: set[str]
+) -> pd.DataFrame:
+    """
+    Load cached parquet files whose source_fil metadata is in source_basenames.
+    """
+    import glob
+
+    files = sorted(glob.glob(os.path.join(cache_dir, "*.parquet")))
+    frames = []
+
+    for f in files:
+        try:
+            table = pq.read_table(f)
+            meta = table.schema.metadata or {}
+            src = meta.get(b"source_file", b"").decode()
+            if src in source_basenames:
+                df = table.to_pandas()
+                if "datetime" in df.columns:
+                    df = df.set_index("datetime")
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index)
+                frames.append(df)
+        except Exception as exc:
+            logger.warning(f"Could not load filtered cache {f}: {exc}")
+
+    if not frames:
+        return pd.DataFrame()
+
+    out = pd.concat(frames).sort_index()
+    out = out[~out.index.duplicated(keep="first")]
+    return out
+
+
+def save_stft_npz(
+    freqs_hz,
+    times_s,
+    power,
+    segment: AudioSegment,
+    cache_dir: str,
+) -> str:
+    """Save STFT power to NPZ with metadata in the filename."""
+    os.makedirs(cache_dir, exist_ok=True)
+    base = os.path.splitext(os.path.basename(segment.source_file))[0]
+    fname = f"{base}_ch{segment.channel}_stft.npz"
+    path = os.path.join(cache_dir, fname)
+
+    np.savez_compressed(
+        path,
+        freqs_hz=freqs_hz,
+        times_s=times_s,
+        power=power,
+        serial=segment.serial, # pyright: ignore[reportArgumentType]
+        sample_rate=segment.sample_rate,
+        source_file=os.path.basename(segment.source_file),
+        datetime_start=(
+            segment.datetime_start.isoformat() if segment.datetime_start else "unknown"
+        ),
+    )
+    return path
+
+
+def load_stft_npz(path: str):
+    return np.load(path, allow_pickle=False)
