@@ -1,3 +1,5 @@
 code_guides/
 .pytest_cache/
 *pycache*
+test_outputs/
+phase_1_test_*
