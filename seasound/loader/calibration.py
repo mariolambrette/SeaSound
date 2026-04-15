@@ -50,7 +50,14 @@ def load_calibration(config: CalibrationConfig) -> Optional[pd.DataFrame]:
     if not config.enabled:
         logger.info("Calibration disabled in config")
         return None
-    
+
+    if config.sensitivity_db_override is not None:
+        logger.info(
+            f"Using sensitivity override: {config.sensitivity_db_override:.2f} dB "
+            f"(calibration file will not be loaded)"
+        )
+        return None
+
     try:
         df = pd.read_excel(config.file, engine="openpyxl")
     except FileNotFoundError:
@@ -159,6 +166,25 @@ def apply_calibration(
     Always check your manufacturer's documentation for the exact meaning
     of their calibration values!
     """
+    # --- sensitivity_db_override: bypass file lookup entirely ---
+    if config.enabled and config.sensitivity_db_override is not None:
+        try:
+            method = get_calibration_method(config.method)
+        except ValueError as exc:
+            if config.strict:
+                raise CalibrationError(str(exc))
+            logger.warning(str(exc))
+            return segment.data, False
+        pressure_pa = method.to_pascals(
+            segment.data, config.sensitivity_db_override, config.vpp
+        )
+        logger.debug(
+            f"Calibration applied via override: "
+            f"method={config.method}, "
+            f"sensitivity={config.sensitivity_db_override:.1f} dB"
+        )
+        return pressure_pa, True
+
     if cal_df is None:
         if config.strict and config.enabled:
             raise CalibrationError(

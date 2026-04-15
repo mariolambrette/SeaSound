@@ -52,6 +52,7 @@ class CalibrationConfig:
     sensitivity_column: str = "High_Gain"
     method: str = "soundtrap"
     vpp: float = 2.0
+    sensitivity_db_override: Optional[float] = None
 
 
 @dataclass
@@ -285,7 +286,11 @@ def validate(raw: dict) -> PipelineConfig:
         errors.append("pipeline.stft_fmin_hz must be < pipeline.stft_fmax_hz")
 
     # --- Calibration validation ---
-    if config.calibration.enabled and config.calibration.strict:
+    if (
+        config.calibration.enabled
+        and config.calibration.strict
+        and config.calibration.sensitivity_db_override is None
+    ):
         if not os.path.isfile(config.calibration.file) and not config.analyse_only:
             errors.append(
                 f"calibration.file '{config.calibration.file}' not found. "

@@ -38,7 +38,9 @@ input:
   # custom_datetime_format: "%y%m%d%H%M%S"
 
   # Only used when filename_format is "manual":
+  # serial_override overrides the serial extracted from the filename (any format):
   # serial_override: "9471"
+  # start_datetime is only used when filename_format is "manual":
   # start_datetime: "2025-10-11 12:00:00"
 
 # -----------------------------------------------------------------------------
@@ -74,6 +76,11 @@ calibration:
 
 # ---------------------------------------------------------------------------
 # Deployment clipping (optional)
+  # Optional: provide a single sensitivity value (dB) directly.
+  # When set, the calibration file is not required and the serial number
+  # is not used for lookup. Applies the same conversion method as above.
+  # Example: sensitivity_db_override: -176.0
+
 # ---------------------------------------------------------------------------
 # Trim the start and end of the recording to remove handling noise.
 # Three methods available:
@@ -223,140 +230,153 @@ pipeline:
   stft_dtype: "float32"
 
 
-# -----------------------------------------------------------------------------
-# Analyses
-# -----------------------------------------------------------------------------
-# Each analysis block follows the pattern:
-#   <name>:
-#     enabled: true/false
-#     type: "<algorithm>"       (only for modules with multiple algorithms)
-#     config:
-#       <parameter>: <value>
+# =============================================================================
+# ANALYSIS: Phase 2 module configuration
+# =============================================================================
+# Each analysis below has:
+#   - enabled: bool (default false)
+#   - required: bool (default true) — required modules fail pipeline if they error
+#   - config: dict (module-specific parameters)
 #
-# Analyses run in the order listed below. The "report" module always
-# runs last regardless of position.
-# -----------------------------------------------------------------------------
+# Analyses are run in the order listed below, unless skipped due to enabled=false.
+# =============================================================================
 
 analyses:
-  spectrogram:
-    enabled: true
-    config:
-      # Time resolution for spectrogram display (seconds per pixel column).
-      # Smaller = finer temporal detail, larger files.
-      time_resolution_s: 60
-
-      # Frequency axis range (Hz)
-      freq_range: [10, 50000]
-
-      # Colour scale limits (dB re reference pressure).
-      # Set to null for automatic scaling.
-      color_limits: [60, 120]
-
-      # Colour map name (any matplotlib colormap)
-      colormap: "viridis"
-
-      # Output format: "png", "pdf", or "csv" (raw spectrogram matrix)
-      output_format: "png"
-
-      # Image DPI (only for png/pdf)
-      dpi: 300
-
-      # Whether to re-read WAV files for full-resolution FFT spectrograms.
-      # When false, uses the TOB base matrix (coarser frequency resolution
-      # but no additional I/O). When true, produces a standard narrowband
-      # spectrogram by re-reading audio files.
-      high_resolution: false
-
-      # FFT parameters for high-resolution mode only:
-      fft_window_s: 0.05
-      fft_overlap: 0.5
-
-  tob_levels:
-    enabled: true
-    config:
-      # Summary time windows. Each produces a separate output file.
-      # Use pandas offset aliases: "1s", "10s", "1min", "1h", "12h", "24h"
-      summary_windows: ["1min", "1h", "12h", "24h"]
-
-      # Statistic used to summarise each window
-      statistic: "median"
-
-      # Additional per-window statistics to include alongside the primary
-      # statistic. Set to empty list to only output the primary statistic.
-      additional_stats: ["mean", "std"]
-
-      # Specific TOB bands to include in output (Hz).
-      # Set to null to include all bands.
-      # bands_hz: [63, 125, 200, 500, 1000, 2000]
-      bands_hz: null
-
-      output_format: "csv"
-
-  spectral_percentiles:
-    enabled: true
-    config:
-      # Percentiles to compute
-      percentiles: [1, 5, 25, 50, 75, 95, 99]
-
-      # Window over which percentiles are computed:
-      #   "full" = entire deployment (single output)
-      #   Any pandas offset alias = per-window percentiles
-      window: "full"
-
-      output_format: "csv"
-
+  # =========================================================================
+  # LTSA: Long-Term Spectral Average
+  # =========================================================================
+  # Aggregates 1-second base matrix to coarser time resolution
+  # and computes per-frequency summary statistics.
   ltsa:
     enabled: true
+    required: true
     config:
-      # Time resolution for the LTSA (pandas offset alias)
+      # Time resolution for aggregation (pandas offset alias)
+      # Examples: "1h" (hourly), "6h" (6-hourly), "1d" (daily)
       time_resolution: "1h"
-
+      
       # Statistic for aggregation within each time bin
+      # One of: "median", "mean", "max", "min", "std"
       statistic: "median"
+      
+      # Frequency range to include (Hz). null = all bands.
+      # Example: [100, 10000] to include only 100–10 kHz
+      freq_range: null
+      
+      # Output format: always "csv" for Phase 2
+      output_format: "csv"
 
+  # =========================================================================
+  # TOB Levels: Per-frequency summary statistics
+  # =========================================================================
+  # Computes summary statistics (median, percentiles, max, etc.)
+  # per TOB frequency band across the entire deployment.
+  tob_levels:
+    enabled: true
+    required: true
+    config:
+      # List of statistics to compute for each frequency band.
+      # Can be:
+      #   - Standard: "median", "mean", "std", "max", "min"
+      #   - Percentiles: "p5", "p25", "p50", "p75", "p95", "p99", etc.
+      statistics: ["median", "p5", "p95"]
+      
+      # Optional: windowed statistics (seconds). null = entire deployment.
+      # Example: 3600 for 1-hour windows
+      window_s: null
+      
       # Frequency range to include (Hz). null = all bands.
       freq_range: null
-
+      
+      # Output format: always "csv" for Phase 2
       output_format: "csv"
 
-  event_detection:
+  # =========================================================================
+  # Spectral Percentiles: Percentile distributions
+  # =========================================================================
+  # Computes percentile distributions per frequency band
+  # over the entire deployment or time windows.
+  spectral_percentiles:
     enabled: true
-
-    # Detection algorithm. Currently supported:
-    #   "adaptive_threshold" — rolling baseline + dB exceedance
-    # Planned:
-    #   "acoustic_complexity" — scikit-maad ACI-based detection
-    type: "adaptive_threshold"
-
+    required: true
     config:
-      # Frequency range for broadband SPL summation (Hz)
-      broadband_freq_range: [100, 50000]
-
-      # Rolling baseline parameters
-      baseline_window_hours: 1
-      baseline_percentile: 10
-
-      # Detection threshold: flag when broadband SPL exceeds
-      # baseline + this many dB
-      threshold_db: 10.0
-
-      # Minimum event duration (seconds). Shorter detections are discarded.
-      min_duration_s: 3
-
-      # Merge gap: events separated by fewer than this many seconds
-      # are combined into a single event.
-      merge_gap_s: 30
-
+      # Percentiles to compute (0–100)
+      # Examples: [5, 25, 50, 75, 95] for quintiles
+      percentiles: [5, 25, 50, 75, 95]
+      
+      # Time window for percentile computation
+      # "full" = entire deployment (single output row)
+      # Or pandas offset alias like "1h", "6h", "1d"
+      window: "full"
+      
+      # Frequency range to include (Hz). null = all bands.
+      freq_range: null
+      
+      # Output format: always "csv" for Phase 2
       output_format: "csv"
 
-  report:
+  # =========================================================================
+  # Spectrogram: Time-frequency visualization
+  # =========================================================================
+  # Creates a time-frequency heatmap showing SPL variation.
+  spectrogram:
     enabled: true
+    required: false
     config:
-      # Report includes all enabled analyses automatically.
-      # Paper size for the PDF
-      paper_size: "A4"
+      # Frequency range to visualize (Hz). null = all bands.
+      freq_range: null
+      
+      # dB scale range for visualization (e.g., [60, 120] dB).
+      # null = automatic scaling
+      db_range: [60, 120]
+      
+      # Matplotlib colormap name
+      # Common: "viridis", "plasma", "inferno", "magma", "cividis"
+      colormap: "viridis"
+      
+      # Output format: "png" (default), "pdf", or "csv" (raw matrix)
+      output_format: "png"
 
-      # DPI for embedded plots
+      # Optional time chunking for multiple outputs.
+      # null = one full-deployment spectrogram
+      # Examples: "1h", "6h", "1d"
+      time_chunk: null
+
+      # When true, missing seconds are rendered as blank columns.
+      # Use true for QA of duty-cycled recording schedules.
+      # Use false for compact visual inspection of only recorded data.
+      preserve_time_gaps: false
+      
+      # DPI for PNG/PDF output
       dpi: 300
 
+  # =========================================================================
+  # Event Detection (not implemented in Phase 2)
+  # =========================================================================
+  # Placeholder for Phase 3 event detection.
+  # Disabled by default.
+  event_detection:
+    enabled: false
+    required: false
+    type: "adaptive_threshold"
+    config:
+      broadband_freq_range: [100, 50000]
+      baseline_window_hours: 1
+      baseline_percentile: 10
+      threshold_db: 10.0
+      min_duration_s: 3
+      merge_gap_s: 30
+      output_format: "csv"
+
+  # =========================================================================
+  # Report Generation (not yet implemented)
+  # =========================================================================
+  # Placeholder for PDF report generation.
+  # Disabled by default.
+  report:
+    enabled: false
+    required: false
+    config:
+      paper_size: "A4"
+      dpi: 300
       output_format: "pdf"

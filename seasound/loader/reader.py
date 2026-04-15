@@ -126,6 +126,10 @@ def read_audio(
     serial = metadata.serial
     dt_start = metadata.datetime_start
 
+    # serial_override applies regardless of filename_format
+    if config.serial_override:
+        serial = config.serial_override
+
     logger.info(
         f"Read {os.path.basename(filepath)}: "
         f"{sample_rate} Hz, "

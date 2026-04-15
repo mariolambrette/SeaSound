@@ -156,9 +156,12 @@ def test_config(tmp_path, sample_calibration_file):
 @pytest.fixture
 def synthetic_stereo_wav(tmp_path):
     """
-    Generate a 10-second stereo WAV file for resume/channel tests.
-    Channel 0: 1000 Hz sine
-    Channel 1: 2000 Hz sine
+    Generate a 10-second stereo WAV file for multi-channel testing.
+    
+    Returns
+    -------
+    str
+        Path to synthetic stereo WAV file.
     """
     if sf is None:
         pytest.skip("soundfile not installed")
@@ -173,3 +176,56 @@ def synthetic_stereo_wav(tmp_path):
     filepath = str(tmp_path / "9999.260101120000.wav")
     sf.write(filepath, audio, sr)
     return filepath
+
+@pytest.fixture
+def synthetic_long_base_matrix():
+    """
+    Deterministic 10-day synthetic base matrix for statistical/window tests.
+
+    - 10 days at 1-second resolution (864,000 rows)
+    - 5 TOB-style frequency columns
+    - Values in realistic SPL range with deterministic pseudo-random noise
+    - Includes a daily cycle + controlled burst events to exercise percentiles/windowing
+    """
+    n_seconds = 10 * 24 * 3600
+    index = pd.date_range(
+        start="2026-01-01 00:00:00",
+        periods=n_seconds,
+        freq="1s",
+        tz="UTC",
+    )
+
+    # Deterministic RNG for stable tests across environments
+    rng = np.random.default_rng(42)
+
+    # 5 representative TOB bands
+    freqs_hz = [10.0, 100.0, 1000.0, 10000.0, 50000.0]
+    cols = [f"{f}Hz" for f in freqs_hz]
+
+    # Build signal components
+    t = np.arange(n_seconds, dtype=float)
+
+    # Daily cycle in dB-space (small amplitude; keeps realistic variation)
+    daily = 3.0 * np.sin(2.0 * np.pi * t / 86400.0)
+
+    # Low-amplitude random variation
+    noise = rng.normal(loc=0.0, scale=1.2, size=(n_seconds, len(cols)))
+
+    # Frequency-dependent baseline
+    baselines = np.array([72.0, 75.0, 78.0, 81.0, 84.0], dtype=float)
+
+    data = baselines + daily[:, None] + noise
+
+    # Add deterministic burst events (for high-percentile behavior)
+    burst_starts = [6 * 3600, 30 * 3600, 54 * 3600, 78 * 3600, 102 * 3600, 126 * 3600, 150 * 3600, 174 * 3600, 198 * 3600, 222 * 3600]
+    burst_len = 300  # 5 minutes
+    for s in burst_starts:
+        e = min(s + burst_len, n_seconds)
+        data[s:e, :] += np.array([6.0, 8.0, 10.0, 7.0, 5.0], dtype=float)
+
+    # Clip to realistic SPL bounds
+    data = np.clip(data, 50.0, 120.0)
+
+    out = pd.DataFrame(data, index=index, columns=cols)
+    out.index.name = "datetime"
+    return out

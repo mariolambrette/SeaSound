@@ -201,6 +201,21 @@ def _process_one_file(
         )
         matrix = compute_base_matrix(audio_pa, segment.sample_rate, config.pipeline)
 
+        # Keep Stage 1 in-memory artifacts aligned with cached representation:
+        # analysis modules require DatetimeIndex for temporal resampling.
+        if (
+            segment.datetime_start is not None
+            and not isinstance(matrix.index, pd.DatetimeIndex)
+        ):
+            dt_index = pd.date_range(
+                start=segment.datetime_start,
+                periods=len(matrix),
+                freq="1s",
+            )
+            matrix = matrix.copy()
+            matrix.index = dt_index
+            matrix.index.name = "datetime"
+
         cache_paths: list[str] = []
         if config.pipeline.cache_base_matrix:
             path = save_base_matrix(matrix, segment, calibrated, cache_dir)
@@ -395,29 +410,66 @@ def _is_fully_cached(wav_path: str, config: PipelineConfig, cache_dir: str) -> b
 # ---------------------------------------------------------------------------
 
 def run_analyses(base_matrix: pd.DataFrame, config: PipelineConfig) -> dict:
+    """
+    Run enabled analysis modules and return results.
+    
+    Parameters
+    ----------
+    base_matrix : pd.DataFrame
+        Computed TOB base matrix from Stage 1.
+    config : PipelineConfig
+        Full pipeline config with analyses entries.
+    
+    Returns
+    -------
+    dict
+        Per-module results: {name → {"outputs", "summary", "warnings"}}.  
+    """
     from seasound.analysis.registry import get_analysis
-
+    
     results = {}
     analyses = config.analyses or {}
-
+    
     for name, entry in analyses.items():
+        # Skip disabled analyses
         if not isinstance(entry, dict) or not entry.get("enabled", False):
+            logger.debug(f"Skipping disabled analysis: {name}")
             continue
-
-        module = get_analysis(name)
-        module_cfg = entry.get("config", {})
-        module.validate_config(module_cfg)
-
-        res = module.run(base_matrix, module_cfg, config.output.directory)
-        results[name] = {
-            "outputs": res.outputs,
-            "summary": res.summary,
-            "warnings": res.warnings,
-        }
-
+        
+        required = entry.get("required", True)
+        
+        try:
+            # Instantiate and validate module
+            module = get_analysis(name)
+            module_cfg = entry.get("config", {})
+            module.validate_config(module_cfg)
+            
+            # Run analysis
+            logger.info(f"Running analysis: {name} (required={required})")
+            res = module.run(base_matrix, module_cfg, config.output.directory)
+            
+            results[name] = {
+                "outputs": res.outputs,
+                "summary": res.summary,
+                "warnings": res.warnings,
+            }
+            
+            # Log warnings if any
+            if res.warnings:
+                for warning in res.warnings:
+                    logger.warning(f"  [{name}] {warning}")
+        
+        except Exception as e:
+            if required:
+                logger.error(f"Required analysis '{name}' failed: {e}")
+                raise
+            else:
+                logger.warning(f"Optional analysis '{name}' failed (continuing): {e}")
+                continue
+    
     if not results:
         logger.info("No enabled analyses found in config")
-
+    
     return results
 
 
@@ -430,8 +482,24 @@ def write_manifest(
     input_files: list[str],
     output_dir: str,
     elapsed_s: float,
+    analysis_results: dict | None = None,
 ):
-    """Write run_manifest.json alongside outputs."""
+    """
+    Write run_manifest.json with full provenance and analysis results.
+    
+    Parameters
+    ----------
+    config : PipelineConfig
+        Full pipeline config.
+    input_files : list
+        List of input audio file paths.
+    output_dir : str
+        Output directory path.
+    elapsed_s : float
+        Pipeline elapsed time in seconds.
+    analysis_results : dict or None
+        Results from run_analyses() or None if analyses were skipped.
+    """
     manifest = {
         "seasound_version": seasound.__version__,
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -446,6 +514,11 @@ def write_manifest(
             "base_resolution_s": config.pipeline.base_resolution_s,
         },
     }
+    
+    # Add analysis results if present
+    if analysis_results:
+        manifest["analyses"] = analysis_results
+    
     path = os.path.join(output_dir, "run_manifest.json")
     with open(path, "w") as f:
         json.dump(manifest, f, indent=2)
@@ -480,15 +553,16 @@ def run_pipeline(config: PipelineConfig) -> None:
                 & (base_matrix.index <= clip_end)
             ]
 
+    analysis_results = None
     if not config.load_only:
         logger.info("=" * 60)
         logger.info("STAGE 2: ANALYSIS")
         logger.info("=" * 60)
-        run_analyses(base_matrix, config)
+        analysis_results = run_analyses(base_matrix, config)
 
     elapsed = time_module.time() - t0
     input_files = find_audio_files(config)
-    write_manifest(config, input_files, config.output.directory, elapsed)
+    write_manifest(config, input_files, config.output.directory, elapsed, analysis_results)
 
     logger.info("=" * 60)
     logger.info(f"Pipeline complete ({timedelta(seconds=int(elapsed))})")
@@ -528,6 +602,10 @@ def cli_main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity (default: INFO)"
     )
+    parser.add_argument(
+        "--list-analyses", action="store_true",
+        help="List all registered analysis modules and exit"
+    )
 
     args = parser.parse_args()
 
@@ -544,6 +622,18 @@ def cli_main():
 
     # Setup logging
     setup_logging(args.log_level)
+
+    # List analyses if requested
+    if args.list_analyses:
+        from seasound.analysis.registry import list_registered
+        modules = list_registered()
+        if modules:
+            print("\nRegistered analysis modules:")
+            for name, cls in sorted(modules.items()):
+                print(f"  {name:25} ({cls})")
+        else:
+            print("No analysis modules registered")
+        return
 
     # Load config
     try:
