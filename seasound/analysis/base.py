@@ -142,3 +142,19 @@ class AnalysisModule(ABC):
             )
         
         return base_matrix[selected].copy()
+
+    def set_runtime_context(
+        self,
+        context: dict,
+    ) -> None:
+        """
+        Attach runtime context provided by the pipeline.
+
+        This is optional and modules can ignore it.
+        """
+        self._runtime_context = dict(context)
+
+    
+    def _get_runtime_context(self) -> dict:
+        """Access runtime context provided by the pipeline."""
+        return getattr(self, "_runtime_context", {})

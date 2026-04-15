@@ -110,6 +110,8 @@ deployment:
     start: 0.0 # Remove from start of the recording (hours)
     end: 0.0 # Remove from end of the recording (hours)
 
+  # TODO: Add seconds buffer
+
   # --- metadata method ---
   metadata_file: ""
   metadata_format: "seasound"      # "seasound" (CSV) or "excel" (custom columns)

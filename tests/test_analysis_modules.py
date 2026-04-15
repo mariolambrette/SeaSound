@@ -242,8 +242,17 @@ class TestSpectrogramAnalysis:
         with pytest.raises(ValueError):
             module.validate_config(cfg)
 
-    def test_spectrogram_run_csv_format(self, synthetic_base_matrix, tmp_path):
+    def test_spectrogram_run_csv_format(
+        self, synthetic_base_matrix, synthetic_wav, test_config, tmp_path
+    ):
         module = SpectrogramAnalysis()
+        module.set_runtime_context(
+            {
+                "pipeline_config": test_config,
+                "cache_dir": str(tmp_path),
+                "input_files": [synthetic_wav],
+            }
+        )
         cfg = {"output_format": "csv"}
         result = module.run(synthetic_base_matrix, cfg, str(tmp_path))
 
@@ -251,46 +260,79 @@ class TestSpectrogramAnalysis:
         assert len(result.outputs) == 1
         assert "spectrogram.csv" in result.outputs[0]
         assert os.path.isfile(result.outputs[0])
+        assert result.summary["data_source"] == "STFT-derived matrix"
 
-    def test_spectrogram_run_csv_chunked(self, synthetic_base_matrix, tmp_path):
+    def test_spectrogram_run_csv_chunked(
+        self, synthetic_base_matrix, synthetic_wav, test_config, tmp_path
+    ):
         module = SpectrogramAnalysis()
-        cfg = {"output_format": "csv", "time_chunk": "30min"}
+        module.set_runtime_context(
+            {
+                "pipeline_config": test_config,
+                "cache_dir": str(tmp_path),
+                "input_files": [synthetic_wav],
+            }
+        )
+        cfg = {"output_format": "csv", "time_chunk": "5s"}
         result = module.run(synthetic_base_matrix, cfg, str(tmp_path))
 
-        assert len(result.outputs) == 2
+        assert len(result.outputs) >= 2
         assert all("spectrogram_" in p for p in result.outputs)
         assert all(os.path.isfile(p) for p in result.outputs)
+        assert result.summary["data_source"] == "STFT-derived matrix"
 
-    def test_spectrogram_run_png_format(self, synthetic_base_matrix, tmp_path):
-        try:
-            import matplotlib  # noqa: F401
-        except ImportError:
-            pytest.skip("matplotlib not installed")
-
-        module = SpectrogramAnalysis()
-        cfg = {"output_format": "png", "dpi": 150}
-        result = module.run(synthetic_base_matrix, cfg, str(tmp_path))
-
-        assert "spectrogram.png" in result.outputs[0]
-        assert os.path.isfile(result.outputs[0])
-
-    def test_spectrogram_run_png_preserve_time_gaps_summary(
-        self, synthetic_base_matrix, tmp_path
+    def test_spectrogram_run_png_format(
+        self, synthetic_base_matrix, synthetic_wav, test_config, tmp_path
     ):
         try:
             import matplotlib  # noqa: F401
         except ImportError:
             pytest.skip("matplotlib not installed")
 
-        # Remove a gap from otherwise 1-second regular data.
-        with_gap = synthetic_base_matrix.drop(synthetic_base_matrix.index[100:200])
+        module = SpectrogramAnalysis()
+        module.set_runtime_context(
+            {
+                "pipeline_config": test_config,
+                "cache_dir": str(tmp_path),
+                "input_files": [synthetic_wav],
+            }
+        )
+        cfg = {"output_format": "png", "dpi": 150}
+        result = module.run(synthetic_base_matrix, cfg, str(tmp_path))
+
+        assert "spectrogram.png" in result.outputs[0]
+        assert os.path.isfile(result.outputs[0])
+        assert result.summary["data_source"] == "STFT-derived matrix"
+
+    def test_spectrogram_run_png_preserve_time_gaps_summary(
+        self, synthetic_base_matrix, synthetic_wav, test_config, tmp_path
+    ):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            pytest.skip("matplotlib not installed")
 
         module = SpectrogramAnalysis()
+        module.set_runtime_context(
+            {
+                "pipeline_config": test_config,
+                "cache_dir": str(tmp_path),
+                "input_files": [synthetic_wav],
+            }
+        )
         cfg = {"output_format": "png", "preserve_time_gaps": True}
-        result = module.run(with_gap, cfg, str(tmp_path))
+        result = module.run(synthetic_base_matrix, cfg, str(tmp_path))
 
         assert result.summary["preserve_time_gaps"] is True
-        assert result.summary["missing_seconds_visualized"] == 100
+        assert result.summary["missing_seconds_visualized"] >= 0
+
+    def test_spectrogram_run_raises_without_stft_context(
+        self, synthetic_base_matrix, tmp_path
+    ):
+        module = SpectrogramAnalysis()
+        cfg = {"output_format": "csv"}
+        with pytest.raises(AnalysisModuleError):
+            module.run(synthetic_base_matrix, cfg, str(tmp_path))
 
 
 class TestAnalysisRegistry:

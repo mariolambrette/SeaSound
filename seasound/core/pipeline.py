@@ -38,6 +38,9 @@ from seasound.loader.filename_parsers import FilenameParser, get_parser
 from seasound.loader.metadata_readers import get_metadata_reader
 from seasound.loader.loaded_artifacts import SegmentArtifact, LoadingOutput
 
+from seasound.analysis.calculate_stft import get_stft_for_file
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -192,6 +195,15 @@ def _process_one_file(
     Cache writes are optional side effects.
     Returns in-memory artifacts regardless of cache mode.
     """
+    # Optional STFT cache generation during STage 1.
+    # This ensures lload-only runs can precomput STFT products.
+    if config.pipeline.stft_cache_enabled:
+        try:
+            get_stft_for_file(wav_path, config, cache_dir)
+        except Exception as exc:
+            logger.error(f"STFT caching failed for {wav_path}: {exc}")
+            raise
+    
     segments = read_audio(wav_path, config.input, parser=parser)
     artifacts: list[SegmentArtifact] = []
 
@@ -393,17 +405,38 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
     return full_matrix
 
 
-def _expected_channels_for_file(wav_path: str, config: PipelineConfig) -> list[int]:
-    """Return output channel IDs expected for this file under current strategy."""
+def _expected_channels_for_file(
+    wav_path: str, 
+    config: PipelineConfig,
+) -> list[int]:
+    """
+    Return output channel IDs expected for this file under current strategy.
+    """
     parser = get_parser(config.input)
     segments = read_audio(wav_path, config.input, parser=parser)
     return [seg.channel for seg in segments]
 
 
-def _is_fully_cached(wav_path: str, config: PipelineConfig, cache_dir: str) -> bool:
+def _is_fully_cached(
+    wav_path: str, 
+    config: PipelineConfig, 
+    cache_dir: str,
+) -> bool:
     """True only if all expected output channels are present in cache."""
     channels = _expected_channels_for_file(wav_path, config)
-    return all(is_cached(wav_path, ch, cache_dir) for ch in channels)
+    
+    base_ok = all(is_cached(wav_path, ch, cache_dir) for ch in channels)
+    if not base_ok:
+        return False
+    
+    if not config.pipeline.stft_cache_enabled:
+        return True
+    
+    base = os.path.splitext(os.path.basename(wav_path))[0]
+    return all(
+        os.path.isfile(os.path.join(cache_dir, f"{base}_ch{ch}_stft.npz"))
+        for ch in channels
+    )
 
 # ---------------------------------------------------------------------------
 # Stage 2: Analysis (placeholder for Phase 2)
@@ -429,6 +462,15 @@ def run_analyses(base_matrix: pd.DataFrame, config: PipelineConfig) -> dict:
     
     results = {}
     analyses = config.analyses or {}
+
+    cache_dir = config.pipeline.cache_directory or os.path.join(
+        config.output.directory, "cache"
+    )
+    runtime_context = {
+        "pipeline_config": config,
+        "cache_dir": cache_dir,
+        "input_files": find_audio_files(config),
+    }
     
     for name, entry in analyses.items():
         # Skip disabled analyses
@@ -441,6 +483,7 @@ def run_analyses(base_matrix: pd.DataFrame, config: PipelineConfig) -> dict:
         try:
             # Instantiate and validate module
             module = get_analysis(name)
+            module.set_runtime_context(runtime_context)
             module_cfg = entry.get("config", {})
             module.validate_config(module_cfg)
             
