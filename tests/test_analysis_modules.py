@@ -242,6 +242,12 @@ class TestSpectrogramAnalysis:
         with pytest.raises(ValueError):
             module.validate_config(cfg)
 
+    def test_spectrogram_config_invalid_time_bins(self):
+        module = SpectrogramAnalysis()
+        cfg = {"output_format": "png", "time_bins": 0}
+        with pytest.raises(ValueError):
+            module.validate_config(cfg)
+
     def test_spectrogram_run_csv_format(
         self, synthetic_base_matrix, synthetic_wav, test_config, tmp_path
     ):

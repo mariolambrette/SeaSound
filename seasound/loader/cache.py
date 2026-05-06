@@ -18,6 +18,7 @@ instead of re-processing WAV files for minutes/hours.
 
 import os
 import logging
+import tempfile
 from datetime import datetime
 
 import numpy as np
@@ -223,18 +224,37 @@ def save_stft_npz(
     fname = f"{base}_ch{segment.channel}_stft.npz"
     path = os.path.join(cache_dir, fname)
 
-    np.savez_compressed(
-        path,
-        freqs_hz=freqs_hz,
-        times_s=times_s,
-        power=power,
-        serial=segment.serial, # pyright: ignore[reportArgumentType]
-        sample_rate=segment.sample_rate,
-        source_file=os.path.basename(segment.source_file),
-        datetime_start=(
-            segment.datetime_start.isoformat() if segment.datetime_start else "unknown"
-        ),
-    )
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            delete=False,
+            dir=cache_dir,
+            suffix=".npz",
+        ) as tmp_file:
+            tmp_path = tmp_file.name
+            np.savez_compressed(
+                tmp_file,
+                freqs_hz=freqs_hz,
+                times_s=times_s,
+                power=power,
+                serial=segment.serial, # pyright: ignore[reportArgumentType]
+                sample_rate=segment.sample_rate,
+                source_file=os.path.basename(segment.source_file),
+                datetime_start=(
+                    segment.datetime_start.isoformat() if segment.datetime_start else "unknown"
+                ),
+            )
+
+        # Atomic replace to avoid readers observing partial zip content.
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path is not None and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
     return path
 
 

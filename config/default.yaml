@@ -55,6 +55,11 @@ calibration:
   # When false, uncalibrated data is processed with a warning.
   strict: true
 
+  # Optional: provide a single sensitivity value (dB) directly.
+  # When set, the calibration file is not required and the serial number
+  # is not used for lookup. Applies the same conversion method as above.
+  # Example: sensitivity_db_override: -176.0
+
   # Path to calibration spreadsheet (Excel .xlsx)
   file: "./data/SoundTrapCalibration.xlsx"
 
@@ -76,11 +81,6 @@ calibration:
 
 # ---------------------------------------------------------------------------
 # Deployment clipping (optional)
-  # Optional: provide a single sensitivity value (dB) directly.
-  # When set, the calibration file is not required and the serial number
-  # is not used for lookup. Applies the same conversion method as above.
-  # Example: sensitivity_db_override: -176.0
-
 # ---------------------------------------------------------------------------
 # Trim the start and end of the recording to remove handling noise.
 # Three methods available:
@@ -343,6 +343,11 @@ analyses:
       # null = one full-deployment spectrogram
       # Examples: "1h", "6h", "1d"
       time_chunk: null
+
+      # Target number of time bins for visual spectrogram outputs.
+      # null = no visual downsampling; higher values preserve more detail.
+      # This affects PNG/PDF rendering only, not cached STFT .npz files.
+      time_bins: 12000
 
       # When true, missing seconds are rendered as blank columns.
       # Use true for QA of duty-cycled recording schedules.

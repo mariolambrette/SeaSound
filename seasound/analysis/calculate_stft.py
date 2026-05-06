@@ -13,6 +13,7 @@ the STFT power from the calibrated audio data, and save to cache if enabled.
 from __future__ import annotations
 
 import os
+import logging
 import numpy as np
 from typing import Any
 
@@ -22,6 +23,8 @@ from seasound.loader.filename_parsers import get_parser
 from seasound.loader.calibration import load_calibration, apply_calibration
 from seasound.loader.stft import compute_stft_power
 from seasound.loader.cache import load_stft_npz, save_stft_npz
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -71,11 +74,26 @@ def get_stft_for_file(
             else None
         )
 
+        need_compute = True
         if cache_enabled and cache_path and os.path.isfile(cache_path):
-            z = load_stft_npz(cache_path)
-            freqs_hz, times_s, power = z["freqs_hz"], z["times_s"], z["power"]
-        
-        else:
+            try:
+                with load_stft_npz(cache_path) as z:
+                    freqs_hz = np.asarray(z["freqs_hz"])
+                    times_s = np.asarray(z["times_s"])
+                    power = np.asarray(z["power"])
+                need_compute = False
+            except Exception as exc:
+                logger.warning(
+                    "Could not read STFT cache '%s' (%s); recomputing.",
+                    cache_path,
+                    exc,
+                )
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+
+        if need_compute:
             audio_pa, _ = apply_calibration(seg, cal_df, config.calibration)
             freqs_hz, times_s, power = compute_stft_power(
                 audio_pa=audio_pa,

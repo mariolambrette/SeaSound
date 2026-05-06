@@ -195,8 +195,8 @@ def _process_one_file(
     Cache writes are optional side effects.
     Returns in-memory artifacts regardless of cache mode.
     """
-    # Optional STFT cache generation during STage 1.
-    # This ensures lload-only runs can precomput STFT products.
+    # Optional STFT cache generation during Stage 1.
+    # This ensures load-only runs can precompute STFT products.
     if config.pipeline.stft_cache_enabled:
         try:
             get_stft_for_file(wav_path, config, cache_dir)

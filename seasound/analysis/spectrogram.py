@@ -42,6 +42,7 @@ class SpectrogramAnalysis(AnalysisModule):
         - output_format: "png" (default), "pdf", or "csv"
         - dpi: output DPI (default: 300)
         - time_chunk: pandas offset alias (e.g. "1h", "1d") or null
+        - time_bins: target number of visual time bins for png/pdf outputs
         - preserve_time_gaps: bool, render missing seconds as blank columns
         """
         errors = []
@@ -89,6 +90,14 @@ class SpectrogramAnalysis(AnalysisModule):
                 f"spectrogram.config.dpi must be a positive integer; got {dpi}"
             )
 
+        time_bins = cfg.get("time_bins")
+        if time_bins is not None:
+            if not isinstance(time_bins, int) or time_bins <= 0:
+                errors.append(
+                    f"spectrogram.config.time_bins must be a positive integer or null; "
+                    f"got {time_bins}"
+                )
+
         time_chunk = cfg.get("time_chunk")
         if time_chunk is not None:
             if not isinstance(time_chunk, str):
@@ -133,11 +142,15 @@ class SpectrogramAnalysis(AnalysisModule):
             output_format = cfg.get("output_format", "png")
             dpi = cfg.get("dpi", 300)
             time_chunk = cfg.get("time_chunk")
+            time_bins = cfg.get("time_bins", 12000)
             preserve_time_gaps = cfg.get("preserve_time_gaps", False)
             warnings: list[str] = []
 
             # Spectrogram outputs are always STFT-derived.
-            stft_matrix, stft_warnings = self._build_stft_matrix_from_runtime()
+            stft_matrix, stft_warnings = self._build_stft_matrix_from_runtime(
+                output_format=output_format,
+                time_bins=time_bins,
+            )
             warnings.extend(stft_warnings)
             if stft_matrix is None or stft_matrix.empty:
                 raise AnalysisModuleError(
@@ -221,6 +234,7 @@ class SpectrogramAnalysis(AnalysisModule):
                         "data_source": data_source,
                         "n_outputs": len(outputs),
                         "time_chunk": time_chunk if time_chunk is not None else "full",
+                        "time_bins": time_bins,
                         "preserve_time_gaps": preserve_time_gaps,
                         "n_time_samples": len(work_matrix),
                         "n_frequencies": len(work_matrix.columns),
@@ -350,6 +364,7 @@ class SpectrogramAnalysis(AnalysisModule):
                     "colormap": colormap,
                     "n_outputs": len(outputs),
                     "time_chunk": time_chunk if time_chunk is not None else "full",
+                    "time_bins": time_bins,
                     "preserve_time_gaps": preserve_time_gaps,
                     "missing_seconds_visualized": missing_seconds_visualized,
                     "n_time_samples": len(work_matrix),
@@ -367,7 +382,9 @@ class SpectrogramAnalysis(AnalysisModule):
         
     
     def _build_stft_matrix_from_runtime(
-        self
+        self,
+        output_format: str,
+        time_bins: int | None,
     ) -> tuple[pd.DataFrame | None, list[str]]:
         """
         Build a time-frequency matrix from STFT cache or on-demand STFT
@@ -411,6 +428,21 @@ class SpectrogramAnalysis(AnalysisModule):
             )
             return None, warnings
         
+        # Visual outputs may need temporal downsampling to keep memory bounded.
+        # This only affects the matrix used for spectrogram rendering and does
+        # not modify the underlying STFT .npz cache files.
+        downsample_step: pd.Timedelta | None = None
+        if output_format in {"png", "pdf"} and time_bins is not None:
+            if time_bins <= 0:
+                warnings.append(
+                    "time_bins must be positive; visual STFT downsampling disabled."
+                )
+            else:
+                warnings.append(
+                    f"Visual spectrogram assembly targets approximately {time_bins} time bins; "
+                    "STFT .npz cache remains at native resolution."
+                )
+
         frames: list[pd.DataFrame] = []
         for wav_path in input_files:
             try:
@@ -436,10 +468,12 @@ class SpectrogramAnalysis(AnalysisModule):
                     continue
 
                 safe_power = np.maximum(
-                    power.astype(np.float64),
-                    np.finfo(np.float64).tiny
+                    power.astype(np.float32),
+                    np.finfo(np.float32).tiny,
                 )
-                power_db = 10.0 * np.log10(safe_power / (ref_pressure ** 2))
+                power_db = (
+                    10.0 * np.log10(safe_power / np.float32(ref_pressure ** 2))
+                ).astype(np.float32)
 
                 abs_times = (
                     pd.Timestamp(dt_start) + pd.to_timedelta(times_s, unit="s")
@@ -447,6 +481,23 @@ class SpectrogramAnalysis(AnalysisModule):
                 cols = [f"{float(f):.2f}Hz" for f in freqs_hz]
                 frame = pd.DataFrame(power_db.T, index=abs_times, columns=cols)
                 frame.index.name = "datetime"
+
+                if downsample_step is not None and not frame.empty:
+                    diffs = frame.index.to_series().diff().dropna()
+                    positive_diffs = diffs[diffs > pd.Timedelta(0)]
+                    if len(positive_diffs) > 0:
+                        inferred_step = positive_diffs.median()
+                        if isinstance(inferred_step, pd.Timedelta):
+                            native_step = inferred_step
+                        else:
+                            native_step = pd.Timedelta(seconds=0)
+                    else:
+                        native_step = pd.Timedelta(seconds=0)
+
+                    if downsample_step > native_step:
+                        frame = frame.resample(downsample_step).mean()
+                        frame = frame.dropna(how="all")
+
                 frames.append(frame)
         
         if not frames:
@@ -458,6 +509,30 @@ class SpectrogramAnalysis(AnalysisModule):
 
         matrix = pd.concat(frames).sort_index()
         matrix = matrix[~matrix.index.duplicated(keep="first")]
+
+        if downsample_step is None and output_format in {"png", "pdf"} and time_bins is not None:
+            if len(matrix) > 1:
+                duration = matrix.index.max() - matrix.index.min()
+                if isinstance(duration, pd.Timedelta) and duration > pd.Timedelta(0):
+                    step_seconds = max(1.0, duration.total_seconds() / time_bins)
+                    downsample_step = pd.Timedelta(seconds=step_seconds)
+
+        if downsample_step is not None and not matrix.empty:
+            diffs = matrix.index.to_series().diff().dropna()
+            positive_diffs = diffs[diffs > pd.Timedelta(0)]
+            if len(positive_diffs) > 0:
+                inferred_step = positive_diffs.median()
+                if isinstance(inferred_step, pd.Timedelta):
+                    native_step = inferred_step
+                else:
+                    native_step = pd.Timedelta(seconds=0)
+            else:
+                native_step = pd.Timedelta(seconds=0)
+
+            if downsample_step > native_step:
+                matrix = matrix.resample(downsample_step).mean()
+                matrix = matrix.dropna(how="all")
+
         return matrix, warnings
 
 
