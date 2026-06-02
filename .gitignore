@@ -3,3 +3,9 @@ code_guides/
 *pycache*
 test_outputs/
 phase_1_test_*
+test_run_event*
+axa_test/*
+adaptive_threshold_diagnostic*
+test_plot2*
+test_threshold_plot*
+.vscode/*

@@ -346,7 +346,13 @@ class TestAnalysisRegistry:
 
     def test_list_registered_contains_all_modules(self):
         modules = list_registered()
-        expected = {"ltsa", "tob_levels", "spectral_percentiles", "spectrogram"}
+        expected = {
+            "ltsa",
+            "tob_levels",
+            "spectral_percentiles",
+            "spectrogram",
+            "event_detection",
+        }
         assert set(modules.keys()) == expected
 
     def test_get_analysis_ltsa(self):

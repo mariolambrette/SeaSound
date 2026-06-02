@@ -358,25 +358,105 @@ analyses:
       dpi: 300
 
   # =========================================================================
-  # Event Detection (not implemented in Phase 2)
+  # Event Detection
   # =========================================================================
-  # Placeholder for Phase 3 event detection.
-  # Disabled by default.
+  # Runs one or more event detectors over the base matrix. Each detector
+  # produces its own CSV: output/event_detection_<detector_name>.csv
+  #
+  # Built-in detectors:
+  #   "adaptive_threshold" — rolling-baseline dB exceedance (loud events)
+  #   "anomaly"            — PCA reconstruction error (unusual spectra)
+  #
+  # Disabled by default; enable when you have a calibrated deployment
+  # and have decided which detector(s) make sense for the data.
   event_detection:
+    
+    # Enable event detection, when flase all event detection is disabled. When
+    # true, indivudal detectors can be enabled/disabled in the detectors list 
+    # below.
     enabled: false
+    
+    # When true, an error in the event detection module will fail the entire
+    # pipeline. when false, it will log an error and continue with other
+    # analyses.
     required: false
-    type: "adaptive_threshold"
+
     config:
-      broadband_freq_range: [100, 50000]
-      baseline_window_hours: 1
-      baseline_percentile: 10
-      threshold_db: 10.0
-      min_duration_s: 3
-      merge_gap_s: 30
+      # --- Shared parameters (applied to every detector) ---
+
+      # Minimum event duration in seconds. Shorter detections are dropped.
+      min_duration_s: 2
+
+      # Maximum gap (s) between flagged seconds before they're treated as
+      # separate events. Use a larger value for slowly-fluctuating sources
+      # (e.g. ship passes), smaller for sharp transients.
+      merge_gap_s: 15
+
+      # Output format. Only "csv" is supported in this version.
       output_format: "csv"
 
+      # --- Detector list (order = order they run; one CSV per detector) ---
+      detectors:
+
+        # ----- Adaptive threshold (loud-event detector) ---------------------
+        # Flags seconds where broadband SPL exceeds a rolling baseline by
+        # `threshold_db` dB.
+        - type: "adaptive_threshold"
+
+          # Enable this detector
+          enabled: true
+
+          # Frequency band for broadband summation (Hz). null = all bands.
+          broadband_freq_range: [100, 50000]
+
+          # Rolling-baseline window length in hours.
+          baseline_window_hours: 1
+
+          # Percentile of the rolling window used as the baseline value
+          # (e.g. 90 = 90th percentile → top 10% of values above the baseline).
+          baseline_percentile: 90
+
+          # dB above baseline at which a second is flagged.
+          threshold_db: 2.0
+
+        # ----- PCA anomaly detector ------------------------------------------
+        # Flags seconds whose spectrum is unusual relative to the
+        # deployment-wide baseline, using PCA reconstruction error.
+        - type: "anomaly"
+
+          # Enable this detector
+          enabled: true
+
+          # Algorithm variant. Only "pca" is implemented currently.
+          method: "pca"
+
+          # Number of PCA components to retain. Ignored if
+          # `variance_explained` is set.
+          n_components: 5
+
+          # Alternative: retain enough components to cover this fraction of
+          # variance (in (0, 1]). null = use n_components instead.
+          variance_explained: null
+
+          # Frequency range to include in the PCA feature space (Hz).
+          # null = all bands.
+          freq_range_hz: null
+
+          # Trim the loudest X% of rows before fitting the PCA basis. This
+          # makes the "normal" basis robust to existing events. 95 means PCA
+          # is fitted on the quietest 95% of seconds. Must be in [50, 100].
+          baseline_trim_percentile: 95
+
+          # Percentile of the reconstruction-error distribution above which
+          # seconds are flagged. 99.5 ≈ top 0.5% of seconds.
+          threshold_percentile: 99.5
+
+          # Number of top-contributing bands to record per event for
+          # interpretation (top_band_1_hz, top_band_1_contribution, ...).
+          report_top_n_bands: 5
+
   # =========================================================================
-  # Report Generation (not yet implemented)
+  # Report Generation
   # =========================================================================
   # Placeholder for PDF report generation.
   # Disabled by default.

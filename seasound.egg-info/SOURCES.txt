@@ -10,6 +10,7 @@ seasound.egg-info/top_level.txt
 seasound/analysis/__init__.py
 seasound/analysis/base.py
 seasound/analysis/calculate_stft.py
+seasound/analysis/event_detection.py
 seasound/analysis/ltsa.py
 seasound/analysis/registry.py
 seasound/analysis/spectral_percentiles.py
@@ -37,6 +38,7 @@ tests/test_analysis_modules.py
 tests/test_base_matrix.py
 tests/test_calculate_stft.py
 tests/test_calibration.py
+tests/test_event_detection.py
 tests/test_integration_pipeline.py
 tests/test_reader.py
 tests/test_spectral.py
