@@ -87,10 +87,10 @@ def compute_base_matrix(
         strategy = config.missing_band_strategy
         if strategy == "error":
             raise ValueError(msg)
-        elif strategy == "clip":
-            logger.info(f"{msg} — clipping to {max_freq} Hz")
+        if strategy == "clip":
+            logger.info("%s — clipping to %s Hz", msg, max_freq)
         else:  # "nan" — handled after computation
-            logger.info(f"{msg} — unreachable bands will be NaN")
+            logger.info("%s — unreachable bands will be NaN", msg)
 
     # Get TOB centres and band edges
     all_centres = tob_centre_frequencies(config.min_freq_hz, config.max_freq_hz)

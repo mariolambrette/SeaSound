@@ -14,6 +14,7 @@ def compute_stft_power(
     fmin_hz: float = 10.0,
     fmax_hz: float = 50000.0,
 ):
+    """Compute STFT power for a single audio segment."""
     noverlap = win_length - hop_length
     freqs, times, Zxx = signal.stft(
         audio_pa,

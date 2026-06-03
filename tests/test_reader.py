@@ -111,7 +111,7 @@ class TestReader:
         assert seg.sample_rate == 96000
         assert seg.serial == "9999"
         assert seg.channel == 0
-        assert len(seg.data) == 96000 * 10  # 10 seconds
+        assert len(seg.data) == 96000 * 7  # 7 seconds (3 seconds trimmed by default)
 
     def test_read_with_explicit_parser(self, synthetic_wav):
         """Parser can be passed explicitly to avoid re-creation."""

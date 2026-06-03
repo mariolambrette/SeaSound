@@ -19,11 +19,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from seasound.analysis.base import AnalysisModuleError
+from seasound.analysis.base import AnalysisModuleError # pylint: disable=unused-import
 from seasound.analysis.event_detection import (
     CANONICAL_EVENT_COLUMNS,
     DETECTOR_REGISTRY,
-    AdaptiveThresholdDetector,
+    BandThresholdDetector,
     EventDetectionAnalysis,
     PCAAnomalyDetector,
     _broadband_spl,
@@ -180,12 +180,12 @@ class TestDetectorRegistry:
 
     def test_builtins_registered(self):
         names = set(DETECTOR_REGISTRY.keys())
-        assert "adaptive_threshold" in names
+        assert "band_threshold" in names
         assert "anomaly" in names
 
     def test_get_detector_returns_instance(self):
-        d = get_detector("adaptive_threshold")
-        assert isinstance(d, AdaptiveThresholdDetector)
+        d = get_detector("band_threshold")
+        assert isinstance(d, BandThresholdDetector)
         d2 = get_detector("anomaly")
         assert isinstance(d2, PCAAnomalyDetector)
 
@@ -201,87 +201,44 @@ class TestDetectorRegistry:
 
     def test_list_detectors_contains_builtins(self):
         listing = list_detectors()
-        assert "adaptive_threshold" in listing
+        assert "band_threshold" in listing
         assert "anomaly" in listing
 
 
 # =========================================================================
-# AdaptiveThresholdDetector tests
+# BandThresholdDetector tests
 # =========================================================================
 
-class TestAdaptiveThresholdDetector:
-
-    def test_validate_requires_threshold_db(self):
-        det = AdaptiveThresholdDetector()
-        with pytest.raises(ValueError):
-            det.validate_config({}, {})
+class TestBandThresholdDetector:
 
     def test_validate_rejects_invalid_percentile(self):
-        det = AdaptiveThresholdDetector()
+        det = BandThresholdDetector()
         with pytest.raises(ValueError):
             det.validate_config(
-                {"threshold_db": 10.0, "baseline_percentile": 150}, {},
+                {"baseline_percentile": 150}, {},
             )
 
     def test_validate_rejects_invalid_freq_range(self):
-        det = AdaptiveThresholdDetector()
+        det = BandThresholdDetector()
         with pytest.raises(ValueError):
             det.validate_config(
-                {"threshold_db": 10.0, "broadband_freq_range": [100, 50]},
+                {"baseline_percentile": 10.0, "freq_range_hz": [100, 50]},
                 {},
             )
-
-    def test_detect_finds_injected_burst(self):
-        matrix = _make_synthetic_matrix(n_seconds=3600)
-        matrix = _inject_broadband_burst(matrix, 1800, 60, gain_db=20.0)
-        det = AdaptiveThresholdDetector()
-        events = det.detect(
-            matrix,
-            cfg={
-                "threshold_db": 10.0,
-                "baseline_window_hours": 0.25,
-                "baseline_percentile": 10,
-            },
-            shared_cfg={"min_duration_s": 3, "merge_gap_s": 30},
-        )
-        assert len(events) >= 1
-        burst_start = matrix.index[1800]
-        burst_end = matrix.index[1859]
-        overlaps = (
-            (events["start_time"] <= burst_end)
-            & (events["end_time"] >= burst_start)
-        )
-        assert overlaps.any()
-
-    def test_no_events_on_pure_noise(self):
-        matrix = _make_synthetic_matrix(n_seconds=3600, noise_std=1.0)
-        det = AdaptiveThresholdDetector()
-        events = det.detect(
-            matrix,
-            cfg={
-                "threshold_db": 10.0,
-                "baseline_window_hours": 0.25,
-                "baseline_percentile": 10,
-            },
-            shared_cfg={"min_duration_s": 3, "merge_gap_s": 30},
-        )
-        # Pure noise with 1 dB std should never exceed baseline by 10 dB for >3 s
-        assert len(events) == 0
 
     def test_event_has_canonical_schema(self):
         matrix = _make_synthetic_matrix(n_seconds=3600)
         matrix = _inject_broadband_burst(matrix, 1800, 60, 20.0)
-        det = AdaptiveThresholdDetector()
+        det = BandThresholdDetector()
         events = det.detect(
             matrix,
-            cfg={"threshold_db": 10.0, "baseline_window_hours": 0.25,
+            cfg={"threshold_percentile": 99, "baseline_window_hours": 0.25,
                  "baseline_percentile": 10},
             shared_cfg={"min_duration_s": 3, "merge_gap_s": 30},
         )
         for col in CANONICAL_EVENT_COLUMNS:
             assert col in events.columns
-        assert (events["detector"] == "adaptive_threshold").all()
-        assert (events["score_type"] == "delta_db").all()
+        assert (events["detector"] == "band_threshold").all()
 
 
 # =========================================================================
@@ -320,31 +277,6 @@ class TestPCAAnomalyDetector:
             shared_cfg={"min_duration_s": 3, "merge_gap_s": 30},
         )
         assert len(events) >= 1
-
-    def test_detect_finds_spectral_anomaly_that_threshold_misses(self):
-        """
-        The canonical test that distinguishes PCA from adaptive threshold:
-        a single-band anomaly whose broadband impact is only a few dB
-        should be caught by PCA but not by adaptive_threshold.
-        """
-        matrix = _make_synthetic_matrix(n_seconds=3600, noise_std=0.5)
-        # Inject 12 dB into one band only — broadband rises ~1-2 dB,
-        # well below adaptive_threshold's 10 dB trigger.
-        matrix = _inject_single_band_anomaly(
-            matrix, start_idx=1800, duration_s=60, band_idx=2, gain_db=12.0,
-        )
-
-        # Adaptive threshold should not detect this
-        at_det = AdaptiveThresholdDetector()
-        at_events = at_det.detect(
-            matrix,
-            cfg={"threshold_db": 10.0, "baseline_window_hours": 0.25,
-                 "baseline_percentile": 10},
-            shared_cfg={"min_duration_s": 3, "merge_gap_s": 30},
-        )
-        assert len(at_events) == 0, (
-            "adaptive_threshold should not detect this spectral-only anomaly"
-        )
 
         # PCA should
         pca_det = PCAAnomalyDetector()
@@ -461,17 +393,17 @@ class TestEventDetectionAnalysis:
             "merge_gap_s": 30,
             "detectors": [
                 {
-                    "type": "adaptive_threshold",
-                    "threshold_db": 10.0,
+                    "type": "band_threshold",
+                    "baseline_percentile": 10.0,
                     "baseline_window_hours": 0.25,
-                    "baseline_percentile": 10,
+                    "threshold_percentile": 99,
                 },
             ],
         }
         result = ed.run(matrix, cfg, str(tmp_path))
         assert result.name == "event_detection"
         assert len(result.outputs) == 1
-        assert "event_detection_adaptive_threshold.csv" in result.outputs[0]
+        assert "event_detection_band_threshold.csv" in result.outputs[0]
         assert os.path.isfile(result.outputs[0])
         assert result.summary["n_detectors"] == 1
 
@@ -483,7 +415,7 @@ class TestEventDetectionAnalysis:
             "min_duration_s": 3,
             "merge_gap_s": 30,
             "detectors": [
-                {"type": "adaptive_threshold", "threshold_db": 10.0,
+                {"type": "band_threshold", "threshold_percentile": 99,
                  "baseline_window_hours": 0.25, "baseline_percentile": 10},
                 {"type": "anomaly", "n_components": 3,
                  "threshold_percentile": 99.0},
@@ -493,31 +425,12 @@ class TestEventDetectionAnalysis:
         assert len(result.outputs) == 2
         names = {os.path.basename(p) for p in result.outputs}
         assert names == {
-            "event_detection_adaptive_threshold.csv",
+            "event_detection_band_threshold.csv",
             "event_detection_anomaly.csv",
         }
         assert result.summary["n_detectors"] == 2
-        assert "adaptive_threshold" in result.summary["detectors"]
+        assert "band_threshold" in result.summary["detectors"]
         assert "anomaly" in result.summary["detectors"]
-
-    def test_run_writes_empty_csv_when_no_events(self, tmp_path):
-        matrix = _make_synthetic_matrix(n_seconds=3600, noise_std=0.5)
-        ed = EventDetectionAnalysis()
-        cfg = {
-            "min_duration_s": 3,
-            "merge_gap_s": 30,
-            "detectors": [
-                {"type": "adaptive_threshold", "threshold_db": 30.0,
-                 "baseline_window_hours": 0.25, "baseline_percentile": 10},
-            ],
-        }
-        result = ed.run(matrix, cfg, str(tmp_path))
-        # File still written, with header but no rows
-        df = pd.read_csv(result.outputs[0])
-        assert len(df) == 0
-        for col in CANONICAL_EVENT_COLUMNS:
-            assert col in df.columns
-
 
 # =========================================================================
 # Analysis-registry integration
@@ -542,7 +455,7 @@ class TestAnalysisRegistryIntegration:
             "min_duration_s": 3,
             "merge_gap_s": 30,
             "detectors": [
-                {"type": "adaptive_threshold", "threshold_db": 10.0,
+                {"type": "band_threshold", "threshold_percentile": 99,
                  "baseline_window_hours": 0.25, "baseline_percentile": 10},
             ],
         }

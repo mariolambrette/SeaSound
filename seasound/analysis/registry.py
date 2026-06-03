@@ -32,18 +32,20 @@ def register_analysis(name: str, cls: Type[AnalysisModule]) -> None:
     if not issubclass(cls, AnalysisModule):
         raise TypeError(
             f"Analysis module '{name}' must inherit from AnalysisModule; "
-            f"got {cls}"           
+            f"got {cls}"
         )
-    
+
     if name in ANALYSIS_REGISTRY:
         logger.warning(
-            f"Duplicate analysis module registration: '{name}'. "
-            f"Overwriting {ANALYSIS_REGISTRY[name].__name__} with {cls.__name__}"
+            "Duplicate analysis module registration: '%s'. Overwriting %s with %s",
+            name,
+            ANALYSIS_REGISTRY[name].__name__,
+            cls.__name__,
         )
-    
+
     ANALYSIS_REGISTRY[name] = cls
-    logger.debug(f"Registered analysis module: '{name}' ({cls.__name__})")
-    
+    logger.debug("Registered analysis module: '%s' (%s)", name, cls.__name__)
+
 
 
 def get_analysis(name: str) -> AnalysisModule:
@@ -70,14 +72,14 @@ def get_analysis(name: str) -> AnalysisModule:
     if name not in ANALYSIS_REGISTRY:
         available = ", ".join(sorted(ANALYSIS_REGISTRY.keys()))
         raise ValueError(f"Unknown analysis '{name}'. Available: {available}")
-    
+
     try:
         return ANALYSIS_REGISTRY[name]()
     except Exception as exc:
         raise ValueError(
             f"Failed to instantiate analysis module '{name}': {exc}"
-        )
-    
+        ) from exc
+
 
 def list_registered() -> dict[str, str]:
     """

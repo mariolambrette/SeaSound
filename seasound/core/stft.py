@@ -1,130 +1,23 @@
 """
-Unified method for computing/getting STFT power for a WAV file in analysis
-modules.
+STFT matrix construction.
 
-The module provides cache-first STFT retrieval with an on-demand calculation
-fallback.
-
-get_stft_for_file() is the main entry point. It will check if a cache file 
-exists for the given WAV and channel, and if so load it. If not, it will compute
-the STFT power from the calibrated audio data, and save to cache if enabled.
+Builds a time-frequency DataFrame (DateTimeIndex × Hz columns) from STFT
+frames stored in the pipeline runtime context. Both SpectrogramAnalysis
+and EventDetectionAnalysis (when producing annotated spectrograms) call
+this helper.
 """
 
-from __future__ import annotations
-
-import os
 import logging
+import os
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
-from datetime import datetime
-from typing import Any
 
 from seasound.core.config import PipelineConfig
-from seasound.loader.reader import read_audio
-from seasound.loader.filename_parsers import get_parser
-from seasound.loader.calibration import load_calibration, apply_calibration
-from seasound.loader.stft import compute_stft_power
-from seasound.loader.cache import load_stft_npz, save_stft_npz
+from seasound.analysis.calculate_stft import get_stft_for_file
 
 logger = logging.getLogger(__name__)
-
-
-def _stft_cache_path(wav_path: str, channel: int, cache_dir: str) -> str:
-    """Derive cache path for STFT power from WAV path and channel."""
-    base = os.path.splitext(os.path.basename(wav_path))[0]
-    return os.path.join(cache_dir, f"{base}_ch{channel}_stft.npz")
-
-
-def get_stft_for_file(
-    wav_path: str,
-    config: PipelineConfig,
-    cache_dir: str,
-) -> list[dict[str, Any]]:
-    """
-    Return STFT power arrays for all output segments/channels from one WAV file.
-
-    Behaviour:
-        1) If STFT cache is enabled and file exists, load cache
-        2) Else compute STFT on demand from calibrated audio
-        3) If STFT cache is enables, persist computed STFT.
-
-    Returns
-    -------
-    list[dict[str, Any]]
-        One entry per channel with keys:
-            - channel
-            - serial
-            - datetime_start
-            - freqs_hz
-            - times_s
-            - power
-    """
-
-    parser = get_parser(config.input)
-    segments = read_audio(wav_path, config.input, parser=parser)
-    cal_df = load_calibration(config.calibration)
-
-    out: list[dict[str, Any]] = []
-    cache_enabled = bool(config.pipeline.stft_cache_enabled and cache_dir)
-
-
-    for seg in segments:
-        cache_path = (
-            _stft_cache_path(seg.source_file, seg.channel, cache_dir)
-            if cache_enabled
-            else None
-        )
-
-        need_compute = True
-        if cache_enabled and cache_path and os.path.isfile(cache_path):
-            try:
-                with load_stft_npz(cache_path) as z:
-                    freqs_hz = np.asarray(z["freqs_hz"])
-                    times_s = np.asarray(z["times_s"])
-                    power = np.asarray(z["power"])
-                need_compute = False
-            except Exception as exc: # pylint: disable=broad-except
-                logger.warning(
-                    "Could not read STFT cache '%s' (%s); recomputing.",
-                    cache_path,
-                    exc,
-                )
-                try:
-                    os.remove(cache_path)
-                except OSError:
-                    pass
-
-        if need_compute:
-            audio_pa, _ = apply_calibration(seg, cal_df, config.calibration)
-            freqs_hz, times_s, power = compute_stft_power(
-                audio_pa=audio_pa,
-                sample_rate=seg.sample_rate,
-                nfft=config.pipeline.stft_nfft,
-                win_length=config.pipeline.stft_win_length,
-                hop_length=config.pipeline.stft_hop_length,
-                window=config.pipeline.stft_window,
-                fmin_hz=config.pipeline.stft_fmin_hz,
-                fmax_hz=config.pipeline.stft_fmax_hz,
-            )
-
-            if config.pipeline.stft_dtype == "float16":
-                power = power.astype(np.float16)
-            else:
-                power = power.astype(np.float32)
-
-            if cache_enabled:
-                save_stft_npz(freqs_hz, times_s, power, seg, cache_dir)
-
-        out.append({
-            "channel": seg.channel,
-            "serial": seg.serial,
-            "datetime_start": seg.datetime_start,
-            "freqs_hz": freqs_hz, # type: ignore
-            "times_s": times_s, # type: ignore
-            "power": power, # type: ignore
-        })
-
-    return out
 
 
 def build_stft_matrix(
@@ -133,12 +26,7 @@ def build_stft_matrix(
     time_bins: int | None = 12000,
 ) -> tuple[pd.DataFrame | None, list[str]]:
     """
-    STFT matrix construction.
-
-    Builds a time-frequency DataFrame (DateTimeIndex × Hz columns) from STFT
-    frames stored in the pipeline runtime context. Both SpectrogramAnalysis
-    and EventDetectionAnalysis (when producing annotated spectrograms) call
-    this helper.
+    Build a time-frequency DataFrame from STFT cache or on-demand computation.
 
     Parameters
     ----------

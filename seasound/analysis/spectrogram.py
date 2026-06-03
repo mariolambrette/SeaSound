@@ -8,15 +8,14 @@ import os
 import logging
 from collections.abc import Iterator
 from copy import copy
-from datetime import datetime
 
 import pandas as pd
 import numpy as np
 
 from seasound.analysis.base import AnalysisModule, AnalysisResult, AnalysisModuleError
 from seasound.analysis.registry import register_analysis
-from seasound.analysis.calculate_stft import get_stft_for_file
-from seasound.core.config import PipelineConfig
+from seasound.analysis.calculate_stft import build_stft_matrix
+from seasound.core.output_layout import resolve_spectrogram_output_dir
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ class SpectrogramAnalysis(AnalysisModule):
     Creates a time-frequency heatmap (PNG) visualization of the base matrix.
     X-axis: time, Y-axis: frequency (Hz), color: SPL (dB).
     """
-    
+
     name = "spectrogram"
 
     def validate_config(self, cfg: dict) -> None:
@@ -46,7 +45,7 @@ class SpectrogramAnalysis(AnalysisModule):
         - preserve_time_gaps: bool, render missing seconds as blank columns
         """
         errors = []
-        
+
         freq_range = cfg.get("freq_range")
         if freq_range is not None:
             if not isinstance(freq_range, (list, tuple)) or len(freq_range) != 2:
@@ -56,9 +55,9 @@ class SpectrogramAnalysis(AnalysisModule):
                 )
             elif freq_range[0] >= freq_range[1]:
                 errors.append(
-                    f"spectrogram.config.freq_range must have min < max"
+                    "spectrogram.config.freq_range must have min < max"
                 )
-        
+
         db_range = cfg.get("db_range")
         if db_range is not None:
             if not isinstance(db_range, (list, tuple)) or len(db_range) != 2:
@@ -68,22 +67,22 @@ class SpectrogramAnalysis(AnalysisModule):
                 )
             elif db_range[0] >= db_range[1]:
                 errors.append(
-                    f"spectrogram.config.db_range must have min < max"
+                    "spectrogram.config.db_range must have min < max"
                 )
-        
+
         colormap = cfg.get("colormap", "viridis")
         if not isinstance(colormap, str):
             errors.append(
                 f"spectrogram.config.colormap must be a string; got {type(colormap).__name__}"
             )
-        
+
         output_format = cfg.get("output_format", "png")
         if output_format not in {"png", "pdf", "csv"}:
             errors.append(
                 f"spectrogram.config.output_format must be one of "
                 f"{{'png', 'pdf', 'csv'}}; got '{output_format}'"
             )
-        
+
         dpi = cfg.get("dpi", 300)
         if not isinstance(dpi, int) or dpi <= 0:
             errors.append(
@@ -120,7 +119,7 @@ class SpectrogramAnalysis(AnalysisModule):
                 f"spectrogram.config.preserve_time_gaps must be a boolean; "
                 f"got {type(preserve_time_gaps).__name__}"
             )
-        
+
         if errors:
             raise ValueError("\n".join(errors))
 
@@ -134,7 +133,7 @@ class SpectrogramAnalysis(AnalysisModule):
         """Execute Spectrogram analysis."""
         self.validate_config(cfg)
         self._validate_base_matrix(base_matrix)
-        
+
         try:
             # Extract metadata
             db_range = cfg.get("db_range")
@@ -147,8 +146,8 @@ class SpectrogramAnalysis(AnalysisModule):
             warnings: list[str] = []
 
             # Spectrogram outputs are always STFT-derived.
-            stft_matrix, stft_warnings = self._build_stft_matrix_from_runtime(
-                output_format=output_format,
+            stft_matrix, stft_warnings = build_stft_matrix(
+                self._get_runtime_context(),
                 time_bins=time_bins,
             )
             warnings.extend(stft_warnings)
@@ -167,9 +166,15 @@ class SpectrogramAnalysis(AnalysisModule):
 
             if work_matrix.empty:
                 raise AnalysisModuleError("Spectrogram input is empty after filtering")
-            
-            # Create output directory
-            os.makedirs(output_dir, exist_ok=True)
+
+            # Resolve and create the output directory under spectrograms/.
+            # When the annotated spectrogram is also enabled, this becomes
+            # spectrograms/raw/; otherwise it's just spectrograms/.
+            pipeline_cfg = self._get_runtime_context().get("pipeline_config")
+            target_dir = resolve_spectrogram_output_dir(
+                output_dir, pipeline_cfg, which="raw",
+            )
+            os.makedirs(target_dir, exist_ok=True)
 
             def _format_ts_for_filename(ts: pd.Timestamp) -> str:
                 return ts.strftime("%Y%m%dT%H%M%S")
@@ -210,7 +215,7 @@ class SpectrogramAnalysis(AnalysisModule):
                 raise AnalysisModuleError("No spectrogram chunks produced")
 
             outputs: list[str] = []
-            
+
             # Handle different output formats
             if output_format == "csv":
                 # Save raw matrix as CSV (single file or chunked files)
@@ -221,10 +226,10 @@ class SpectrogramAnalysis(AnalysisModule):
                         s = _format_ts_for_filename(window_start)
                         e = _format_ts_for_filename(window_end)
                         filename = f"spectrogram_{i:04d}_{s}_{e}.csv"
-                    output_file = os.path.join(output_dir, filename)
+                    output_file = os.path.join(target_dir, filename)
                     chunk_matrix.to_csv(output_file)
                     outputs.append(output_file)
-                    logger.info(f"Spectrogram output (CSV): {output_file}")
+                    logger.info("Spectrogram output (CSV): %s", output_file)
 
                 return AnalysisResult(
                     name=self.name,
@@ -242,20 +247,20 @@ class SpectrogramAnalysis(AnalysisModule):
                     },
                     warnings=warnings,
                 )
-            
+
             # Create PNG/PDF visualization using matplotlib
             try:
                 import matplotlib
                 matplotlib.use("Agg")  # Non-interactive backend
                 import matplotlib.pyplot as plt
-            except ImportError:
+            except ImportError as exc:
                 raise AnalysisModuleError(
                     "Spectrogram visualization requires matplotlib; "
                     "install with: pip install matplotlib"
-                )
+                ) from exc
 
             missing_seconds_visualized = 0
-            
+
             for i, (window_start, window_end, chunk_matrix) in enumerate(chunks):
                 # Prepare data for visualization
                 # Transpose so time is X-axis, frequency is Y-axis
@@ -346,14 +351,16 @@ class SpectrogramAnalysis(AnalysisModule):
                     s = _format_ts_for_filename(window_start)
                     e = _format_ts_for_filename(window_end)
                     filename = f"spectrogram_{i:04d}_{s}_{e}.{output_format}"
-                output_file = os.path.join(output_dir, filename)
+                output_file = os.path.join(target_dir, filename)
                 fig.savefig(output_file, dpi=dpi, format=output_format)
                 plt.close(fig)
                 outputs.append(output_file)
                 logger.info(
-                    f"Spectrogram output ({output_format.upper()}): {output_file}"
+                    "Spectrogram output (%s): %s",
+                    output_format.upper(),
+                    output_file,
                 )
-            
+
             return AnalysisResult(
                 name=self.name,
                 outputs=outputs,
@@ -374,166 +381,13 @@ class SpectrogramAnalysis(AnalysisModule):
                 },
                 warnings=warnings,
             )
-        
+
         except AnalysisModuleError:
             raise
         except Exception as exc:
-            raise AnalysisModuleError(f"Spectrogram analysis failed: {exc}")
-        
-    
-    def _build_stft_matrix_from_runtime(
-        self,
-        output_format: str,
-        time_bins: int | None,
-    ) -> tuple[pd.DataFrame | None, list[str]]:
-        """
-        Build a time-frequency matrix from STFT cache or on-demand STFT
-        calculation.
-
-        Returns
-        -------
-        tuple
-            (matrix or None, warnings)
-        """
-        warnings: list[str] = []
-        ctx = self._get_runtime_context()
-        cfg_obj = ctx.get("pipeline_config")
-        cache_dir = ctx.get("cache_dir")
-        input_files = ctx.get("input_files")
-
-        if not isinstance(cfg_obj, PipelineConfig):
-            warnings.append(
-                "Pipeline config not available in runtime context;" \
-                " using base matrix."
-            )
-            return None, warnings
-        if not isinstance(cache_dir, str):
-            warnings.append(
-                "Cache directory not available in runtime context;" \
-                " using base matrix."
-            )
-            return None, warnings
-        if not isinstance(input_files, list) or not input_files:
-            warnings.append(
-                "Input files not available in runtime context;" \
-                " using base matrix."
-            )
-            return None, warnings
-        
-        ref_pressure = float(cfg_obj.pipeline.reference_pressure_pa)
-        if ref_pressure <= 0:
-            warnings.append(
-                f"Invalid reference pressure {ref_pressure} Pa; must be > 0. "
-                "Using base matrix without STFT-derived SPL values."
-            )
-            return None, warnings
-        
-        # Visual outputs may need temporal downsampling to keep memory bounded.
-        # This only affects the matrix used for spectrogram rendering and does
-        # not modify the underlying STFT .npz cache files.
-        downsample_step: pd.Timedelta | None = None
-        if output_format in {"png", "pdf"} and time_bins is not None:
-            if time_bins <= 0:
-                warnings.append(
-                    "time_bins must be positive; visual STFT downsampling disabled."
-                )
-            else:
-                warnings.append(
-                    f"Visual spectrogram assembly targets approximately {time_bins} time bins; "
-                    "STFT .npz cache remains at native resolution."
-                )
-
-        frames: list[pd.DataFrame] = []
-        for wav_path in input_files:
-            try:
-                entries = get_stft_for_file(wav_path, cfg_obj, cache_dir)
-            except Exception as exc:
-                warnings.append(
-                    f"Could not load/compute STFT for " \
-                    f"{os.path.basename(wav_path)}: {exc}."
-                )
-                continue
-
-            for entry in entries:
-                dt_start = entry.get("datetime_start")
-                if dt_start is None:
-                    continue
-                if not isinstance(dt_start, (pd.Timestamp,datetime)):
-                    continue
-
-                freqs_hz = np.asarray(entry.get("freqs_hz"))
-                times_s = np.asarray(entry.get("times_s"))
-                power = np.asarray(entry.get("power"))
-                if power.ndim != 2:
-                    continue
-
-                safe_power = np.maximum(
-                    power.astype(np.float32),
-                    np.finfo(np.float32).tiny,
-                )
-                power_db = (
-                    10.0 * np.log10(safe_power / np.float32(ref_pressure ** 2))
-                ).astype(np.float32)
-
-                abs_times = (
-                    pd.Timestamp(dt_start) + pd.to_timedelta(times_s, unit="s")
-                )
-                cols = [f"{float(f):.2f}Hz" for f in freqs_hz]
-                frame = pd.DataFrame(power_db.T, index=abs_times, columns=cols)
-                frame.index.name = "datetime"
-
-                if downsample_step is not None and not frame.empty:
-                    diffs = frame.index.to_series().diff().dropna()
-                    positive_diffs = diffs[diffs > pd.Timedelta(0)]
-                    if len(positive_diffs) > 0:
-                        inferred_step = positive_diffs.median()
-                        if isinstance(inferred_step, pd.Timedelta):
-                            native_step = inferred_step
-                        else:
-                            native_step = pd.Timedelta(seconds=0)
-                    else:
-                        native_step = pd.Timedelta(seconds=0)
-
-                    if downsample_step > native_step:
-                        frame = frame.resample(downsample_step).mean()
-                        frame = frame.dropna(how="all")
-
-                frames.append(frame)
-        
-        if not frames:
-            warnings.append(
-                "No valid STFT frames could be loaded or computed;" \
-                " using base matrix."
-            )
-            return None, warnings
-
-        matrix = pd.concat(frames).sort_index()
-        matrix = matrix[~matrix.index.duplicated(keep="first")]
-
-        if downsample_step is None and output_format in {"png", "pdf"} and time_bins is not None:
-            if len(matrix) > 1:
-                duration = matrix.index.max() - matrix.index.min()
-                if isinstance(duration, pd.Timedelta) and duration > pd.Timedelta(0):
-                    step_seconds = max(1.0, duration.total_seconds() / time_bins)
-                    downsample_step = pd.Timedelta(seconds=step_seconds)
-
-        if downsample_step is not None and not matrix.empty:
-            diffs = matrix.index.to_series().diff().dropna()
-            positive_diffs = diffs[diffs > pd.Timedelta(0)]
-            if len(positive_diffs) > 0:
-                inferred_step = positive_diffs.median()
-                if isinstance(inferred_step, pd.Timedelta):
-                    native_step = inferred_step
-                else:
-                    native_step = pd.Timedelta(seconds=0)
-            else:
-                native_step = pd.Timedelta(seconds=0)
-
-            if downsample_step > native_step:
-                matrix = matrix.resample(downsample_step).mean()
-                matrix = matrix.dropna(how="all")
-
-        return matrix, warnings
+            raise AnalysisModuleError(
+                f"Spectrogram analysis failed: {exc}"
+            ) from exc
 
 
 register_analysis("spectrogram", SpectrogramAnalysis)

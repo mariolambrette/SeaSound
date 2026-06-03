@@ -10,19 +10,15 @@ letting unexpected errors (bugs) propagate normally.
 
 class SeaSoundError(Exception):
     """Base exception for all SeaSound errors."""
-    pass
 
 
 class ConfigError(SeaSoundError):
     """Raised when configuration is invalid or incomplete."""
-    pass
 
 
 class CalibrationError(SeaSoundError):
     """Raised when calibration data is missing or invalid."""
-    pass
 
 
 class ReaderError(SeaSoundError):
     """Raised when an audio file cannot be read or parsed."""
-    pass

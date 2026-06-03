@@ -40,6 +40,7 @@ class InputConfig:
     custom_datetime_format: Optional[str] = None
     serial_override: Optional[str] = None
     start_datetime: Optional[str] = None
+    per_file_trim_start_s: float = 3.0
 
 
 @dataclass
@@ -161,10 +162,10 @@ def load_yaml(path: str) -> dict:
     if not os.path.isfile(path):
         raise ConfigError(f"Config file not found: {path}")
     try:
-        with open(path, "r") as f:
+        with open(path, "r") as f: #pylint: disable=unspecified-encoding
             raw = yaml.safe_load(f)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"Invalid YAML in {path}: {exc}")
+        raise ConfigError(f"Invalid YAML in {path}: {exc}") from exc
     if raw is None:
         raw = {}
     return raw
@@ -273,6 +274,13 @@ def validate(raw: dict) -> PipelineConfig:
         errors.append(
             f"input.channel_strategy '{config.input.channel_strategy}' "
             f"must be one of: {', '.join(sorted(valid_channels))}"
+        )
+
+    trim_s = config.input.per_file_trim_start_s
+    if not isinstance(trim_s, (int, float)) or trim_s < 0:
+        errors.append(
+            f"input.per_file_trim_start_s must be a non-negative number; "
+            f"got {trim_s}"
         )
 
     # --- STFT validation ---

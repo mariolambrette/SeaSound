@@ -10,10 +10,10 @@ logger = logging.getLogger(__name__)
 
 class AnalysisModuleError(Exception):
     """Raised when an analysis module encounters an unrecoverable error."""
-    pass
 
 @dataclass
 class AnalysisResult:
+    """Container for results produced by an analysis module."""
     name: str
     outputs: list[str] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
@@ -22,7 +22,7 @@ class AnalysisResult:
 
 class AnalysisModule(ABC):
     """Abstract base class for all SeaSound analysis modules."""
-    
+
     name: str
 
     @abstractmethod
@@ -33,7 +33,6 @@ class AnalysisModule(ABC):
         Raise ValueError if config is invalid.
         Called before run() to fail fast on bad parameters.
         """
-        pass
 
     @abstractmethod
     def run(
@@ -66,33 +65,32 @@ class AnalysisModule(ABC):
             If the module encounters an unrecoverable error during processing
             (invalid data, missing columns, etc.).
         """
-        pass
 
     # --- Helper methods for common operations ---
-    
+
     def _validate_base_matrix(self, base_matrix: pd.DataFrame) -> None:
         """Check that base_matrix has expected structure."""
         if base_matrix is None or base_matrix.empty:
             raise AnalysisModuleError("Base matrix is empty.")
-        
+
         if not isinstance(base_matrix.index, pd.DatetimeIndex):
             raise AnalysisModuleError(
                 "Base matrix index must be DateTimeIndex."
             )
-        
+
         freq_cols = self._get_frequency_columns(base_matrix)
         if not freq_cols:
             raise AnalysisModuleError(
                 "No frequency columns found in base matrix."
             )
-        
+
     def _get_frequency_columns(self, base_matrix: pd.DataFrame) -> list[str]:
         """Return all frequency band column names (ending in Hz)."""
         return [
-            c for c in base_matrix.columns 
+            c for c in base_matrix.columns
             if isinstance(c, str) and c.endswith("Hz")
         ]
-    
+
     def _get_frequency_value(self, column_name: str) -> float:
         """
         Extract numeric frequency from column name (e.g., '1000.0Hz' → 1000.0).
@@ -100,11 +98,11 @@ class AnalysisModule(ABC):
         if not column_name.endswith("Hz"):
             raise ValueError(f"Invalid frequency column name: {column_name}")
         return float(column_name[:-2])
-    
+
     def _filter_frequencies(
         self,
         base_matrix: pd.DataFrame,
-        freq_range: tuple[float, float] | None,   
+        freq_range: tuple[float, float] | None,
     ) -> pd.DataFrame:
         """
         Filter base_matrix to only include frequencies in [freq_min, freq_max].
@@ -123,7 +121,7 @@ class AnalysisModule(ABC):
         """
         if freq_range is None:
             return base_matrix.copy()
-        
+
         freq_min, freq_max = freq_range
         freq_cols = self._get_frequency_columns(base_matrix)
 
@@ -140,7 +138,7 @@ class AnalysisModule(ABC):
             raise AnalysisModuleError(
                 f"No frequencies found in range [{freq_min}, {freq_max}] Hz"
             )
-        
+
         return base_matrix[selected].copy()
 
     def set_runtime_context(
@@ -152,9 +150,8 @@ class AnalysisModule(ABC):
 
         This is optional and modules can ignore it.
         """
-        self._runtime_context = dict(context)
+        self._runtime_context = dict(context) # pylint: disable=attribute-defined-outside-init
 
-    
     def _get_runtime_context(self) -> dict:
         """Access runtime context provided by the pipeline."""
         return getattr(self, "_runtime_context", {})

@@ -11,7 +11,11 @@ import logging
 import pandas as pd
 import numpy as np
 
-from seasound.analysis.base import AnalysisModule, AnalysisResult, AnalysisModuleError
+from seasound.analysis.base import (
+    AnalysisModule, 
+    AnalysisResult, 
+    AnalysisModuleError
+)
 from seasound.analysis.registry import register_analysis
 
 
@@ -25,7 +29,7 @@ class TOBLevelsAnalysis(AnalysisModule):
     Computes per-frequency summary statistics across time windows.
     Each window produces one row; statistics are columns.
     """
-    
+
     name = "tob_levels"
 
 
@@ -87,19 +91,19 @@ class TOBLevelsAnalysis(AnalysisModule):
                 )
             elif freq_range[0] >= freq_range[1]:
                 errors.append(
-                    f"tob_levels.config.freq_range must have min < max"
+                    "tob_levels.config.freq_range must have min < max"
                 )
-        
+
         output_format = cfg.get("output_format", "csv")
         if output_format not in {"csv"}:
             errors.append(
                 f"tob_levels.config.output_format must be 'csv'; got '{output_format}'"
             )
-        
+
         if errors:
             raise ValueError("\n".join(errors))
-        
-    
+
+
     def run(
         self,
         base_matrix: pd.DataFrame,
@@ -155,7 +159,7 @@ class TOBLevelsAnalysis(AnalysisModule):
                 for _, group in work_matrix.resample(window_rule):
                     if group.empty:
                         continue
-                    
+
                     if not isinstance(group.index, pd.DatetimeIndex):
                         raise AnalysisModuleError(
                             "TOB Levels windowing requires a DatetimeIndex"
@@ -171,7 +175,7 @@ class TOBLevelsAnalysis(AnalysisModule):
                         _compute_stats(group)
                         .reset_index()
                         .assign(
-                            window_start=ws, 
+                            window_start=ws,
                             window_end=ws + pd.Timedelta(seconds=int(window_s)),
                         )
                     )
@@ -187,13 +191,13 @@ class TOBLevelsAnalysis(AnalysisModule):
                     raise AnalysisModuleError("No non-empty windows produced for TOB Levels")
 
                 output_df = pd.concat(window_frames, ignore_index=True)
-            
+
             # Write output
             os.makedirs(output_dir, exist_ok=True)
             output_file = os.path.join(output_dir, "tob_levels.csv")
             output_df.to_csv(output_file)
-            logger.info(f"TOB Levels output: {output_file}")
-            
+            logger.info("TOB Levels output: %s", output_file)
+
             return AnalysisResult(
                 name=self.name,
                 outputs=[output_file],
@@ -205,19 +209,19 @@ class TOBLevelsAnalysis(AnalysisModule):
                 },
                 warnings=[],
             )
-        
+
         except AnalysisModuleError:
             raise
         except Exception as e:
-            raise AnalysisModuleError(f"TOB Levels analysis failed: {e}")
+            raise AnalysisModuleError(f"TOB Levels analysis failed: {e}") from e
 
-    
+
     # --- Helper functions ---
     def _compute_linear_mean(self, work_matrix: pd.DataFrame) -> pd.Series:
         """Compute mean SPL via linear power averaging, then convert back to dB."""
         linear_power = np.power(10.0, work_matrix / 10.0)
         mean_linear = linear_power.mean(axis=0)  # one value per frequency column
         return 10.0 * np.log10(mean_linear)
-    
+
 
 register_analysis("tob_levels", TOBLevelsAnalysis)

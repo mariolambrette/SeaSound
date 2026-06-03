@@ -20,6 +20,7 @@ To add a new detector:
 import logging
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Type
 
 import numpy as np
@@ -50,6 +51,7 @@ CANONICAL_EVENT_COLUMNS: list[str] = [
     "score",
     "score_type",
 ]
+
 
 
 # =========================================================================
@@ -399,9 +401,71 @@ def _resolve_base_resolution_s(detector: EventDetector) -> float:
     return float(getattr(pipeline_cfg.pipeline, "base_resolution_s", 1))
 
 
+def _validate_plot_block(
+    module_name: str,
+    cfg: dict,
+    valid_types: set[str],
+    errors: list[str],
+) -> None:
+    """Validate a `plot:` block. Accumulates errors instead of raising."""
+    plot_cfg = cfg.get("plot")
+    if plot_cfg is None:
+        return
+    if not isinstance(plot_cfg, dict):
+        errors.append(
+            f"{module_name}.plot must be a mapping or null; "
+            f"got {type(plot_cfg).__name__}"
+        )
+        return
+
+    enabled = plot_cfg.get("enabled", False)
+    if not isinstance(enabled, bool):
+        errors.append(f"{module_name}.plot.enabled must be a boolean")
+
+    types = plot_cfg.get("types", [])
+    if not isinstance(types, list):
+        errors.append(
+            f"{module_name}.plot.types must be a list; "
+            f"got {type(types).__name__}"
+        )
+    else:
+        for t in types:
+            if t not in valid_types:
+                errors.append(
+                    f"{module_name}.plot.types entries must be in "
+                    f"{sorted(valid_types)}; got '{t}'"
+                )
+
+    fmt = plot_cfg.get("output_format", "png")
+    if fmt not in {"png", "pdf"}:
+        errors.append(
+            f"{module_name}.plot.output_format must be 'png' or 'pdf'; "
+            f"got '{fmt}'"
+        )
+
+    dpi = plot_cfg.get("dpi", 300)
+    if not isinstance(dpi, int) or dpi <= 0:
+        errors.append(
+            f"{module_name}.plot.dpi must be a positive integer; got {dpi}"
+        )
+
 # =========================================================================
 # Band Threshold Detector
 # =========================================================================
+
+@dataclass
+class BandThresholdDiagnostics:
+    """
+    Per-band rolling statistics from a BandThresholdDetector run.
+
+    Holds the SPL values that were tested plus the rolling baseline and
+    threshold used to flag exceedances. All three DataFrames share the
+    same DatetimeIndex and columns (one per usable band). Consumed by
+    BandThresholdDiagnosticPlotter.
+    """
+    values:    pd.DataFrame
+    baseline:  pd.DataFrame
+    threshold: pd.DataFrame
 
 class BandThresholdDetector(EventDetector):
     """
@@ -462,7 +526,7 @@ class BandThresholdDetector(EventDetector):
         bp = cfg.get(
             "baseline_percentile", self.DEFAULTS["baseline_percentile"]
         )
-        if not isinstance(bp, (int, float)) or not (0 < bp < 100):
+        if not isinstance(bp, (int, float)) or not 0 < bp < 100:
             errors.append(
                 f"{prefix}.baseline_percentile must be in (0, 100); got {bp}"
             )
@@ -470,7 +534,7 @@ class BandThresholdDetector(EventDetector):
         tp = cfg.get(
             "threshold_percentile", self.DEFAULTS["threshold_percentile"]
         )
-        if not isinstance(tp, (int, float)) or not (0 < tp < 100):
+        if not isinstance(tp, (int, float)) or not 0 < tp < 100:
             errors.append(
                 f"{prefix}.threshold_percentile must be in (0, 100); got {tp}"
             )
@@ -485,7 +549,7 @@ class BandThresholdDetector(EventDetector):
         cov = cfg.get(
             "min_band_coverage", self.DEFAULTS["min_band_coverage"]
         )
-        if not isinstance(cov, (int, float)) or not (0 < cov <= 1):
+        if not isinstance(cov, (int, float)) or not 0 < cov <= 1:
             errors.append(
                 f"{prefix}.min_band_coverage must be in (0, 1]; got {cov}"
             )
@@ -528,58 +592,93 @@ class BandThresholdDetector(EventDetector):
         cfg: dict,
         shared_cfg: dict,
     ) -> pd.DataFrame:
-        # --- Resolve config ---
+        """Run detection. Returns events only."""
+        events_df, _ = self._run(
+            base_matrix, cfg, shared_cfg, return_diagnostics=False,
+        )
+        return events_df
+
+    def detect_with_diagnostics(
+        self,
+        base_matrix: pd.DataFrame,
+        cfg: dict,
+        shared_cfg: dict,
+    ) -> tuple[pd.DataFrame, BandThresholdDiagnostics | None]:
+        """
+        Run detection and additionally return diagnostic time series for
+        plotting/validation. The diagnostics object holds the per-second
+        values, baseline, and threshold for every band that was usable.
+
+        Returns
+        -------
+        (events_df, diagnostics) :
+            ``diagnostics`` is None if no bands were usable (in which
+            case ``events_df`` is empty).
+        """
+        return self._run(
+            base_matrix, cfg, shared_cfg, return_diagnostics=True,
+        )
+
+    def _run(
+        self,
+        base_matrix: pd.DataFrame,
+        cfg: dict,
+        shared_cfg: dict,
+        *,
+        return_diagnostics: bool,
+    ) -> tuple[pd.DataFrame, BandThresholdDiagnostics | None]:
+        """
+        Shared implementation of detect / detect_with_diagnostics.
+
+        Implementation note: previously this was the body of detect(); it
+        was moved here so the same code path serves both public entry
+        points without duplication.
+        """
+        # ---- Read config (unchanged from previous detect()) -----------
         freq_range = cfg.get(
-            "freq_range_hz", self.DEFAULTS["freq_range_hz"]
+            "freq_range", self.DEFAULTS.get("freq_range")
         )
         bw_hours = float(cfg.get(
             "baseline_window_hours",
             self.DEFAULTS["baseline_window_hours"],
         ))
         bp = float(cfg.get(
-            "baseline_percentile",
-            self.DEFAULTS["baseline_percentile"],
+            "baseline_percentile", self.DEFAULTS["baseline_percentile"],
         ))
         tp = float(cfg.get(
-            "threshold_percentile",
-            self.DEFAULTS["threshold_percentile"],
+            "threshold_percentile", self.DEFAULTS["threshold_percentile"],
         ))
         min_cov = float(cfg.get(
-            "min_band_coverage",
-            self.DEFAULTS["min_band_coverage"],
+            "min_band_coverage", self.DEFAULTS["min_band_coverage"],
         ))
         min_dur = int(cfg.get(
             "min_duration_s",
-            self.DEFAULTS["min_duration_s"],
+            shared_cfg.get("min_duration_s", self.DEFAULTS["min_duration_s"]),
         ))
         merge_gap = int(cfg.get(
             "merge_gap_s",
-            self.DEFAULTS["merge_gap_s"],
+            shared_cfg.get("merge_gap_s", self.DEFAULTS["merge_gap_s"]),
         ))
 
         extras_columns = [
-            "band_hz",
-            "band_index",
-            "peak_value_dB",
-            "mean_value_dB",
-            "baseline_dB",
-            "threshold_dB",
-            "delta_peak_dB",
-            "percentile_at_peak",
+            "band_hz", "band_index",
+            "peak_value_dB", "mean_value_dB",
+            "baseline_dB", "threshold_dB",
+            "delta_peak_dB", "percentile_at_peak",
         ]
         empty = pd.DataFrame(
             columns=CANONICAL_EVENT_COLUMNS + extras_columns
         )
 
-        # --- Filter to working frequency range ---
+        # ---- Filter to working frequency range ------------------------
         working = _filter_freq_range(base_matrix, freq_range)
         if working.empty:
             logger.warning(
                 "band_threshold: no bands in working frequency range"
             )
-            return empty
+            return empty, None
 
-        # --- Window sizing in rows (gap-aware) ---
+        # ---- Window sizing (gap-aware row-based) ----------------------
         base_res_s = _resolve_base_resolution_s(self)
         window_rows = max(2, int(bw_hours * 3600 / base_res_s))
         min_periods = max(2, int(window_rows * min_cov))
@@ -589,45 +688,42 @@ class BandThresholdDetector(EventDetector):
             "(%s h at %s s/row); min_periods = %d; "
             "baseline p%g, threshold p%g; min_duration_s = %s, "
             "merge_gap_s = %s",
-            len(working.columns),
-            window_rows,
-            bw_hours,
-            base_res_s,
-            min_periods,
-            bp,
-            tp,
-            min_dur,
-            merge_gap,
+            len(working.columns), window_rows, bw_hours, base_res_s,
+            min_periods, bp, tp, min_dur, merge_gap,
         )
 
-        # --- Vectorised rolling baselines and thresholds for all bands ---
+        # ---- Rolling baseline and threshold for all bands -------------
         rolling = working.rolling(
-            window=window_rows, min_periods=min_periods
+            window=window_rows, min_periods=min_periods,
         )
         baseline_df = rolling.quantile(bp / 100.0)
         threshold_df = rolling.quantile(tp / 100.0)
 
-        # --- Coverage filter: bands with no usable threshold are skipped ---
+        # ---- Coverage filter ------------------------------------------
         coverage_per_band = threshold_df.notna().sum(axis=0) / max(
             1, len(threshold_df)
         )
         usable_bands = [
-            c for c in working.columns
-            if coverage_per_band[c] > 0
+            c for c in working.columns if coverage_per_band[c] > 0
         ]
-        skipped_bands = [c for c in working.columns if c not in usable_bands]
+        skipped_bands = [
+            c for c in working.columns if c not in usable_bands
+        ]
         if skipped_bands:
             logger.warning(
-                "band_threshold: %d band(s) skipped due to insufficient coverage: %s%s",
+                "band_threshold: %d band(s) skipped due to insufficient "
+                "coverage: %s%s",
                 len(skipped_bands),
                 skipped_bands[:5],
                 " ..." if len(skipped_bands) > 5 else "",
             )
         if not usable_bands:
-            logger.warning("band_threshold: no usable bands; no events emitted")
-            return empty
+            logger.warning(
+                "band_threshold: no usable bands; no events emitted"
+            )
+            return empty, None
 
-        # --- Build per-band events ---
+        # ---- Build per-band events (unchanged from previous detect) --
         records: list[dict] = []
         next_event_id = 1
         index = working.index
@@ -641,12 +737,11 @@ class BandThresholdDetector(EventDetector):
             band_baseline = baseline_df[band_name].to_numpy(dtype=np.float64)
             band_threshold = threshold_df[band_name].to_numpy(dtype=np.float64)
 
-            # Flag: value > threshold (both must be valid)
             valid = np.isfinite(band_values) & np.isfinite(band_threshold)
             flags = valid & (band_values > band_threshold)
 
             event_windows = _flag_and_merge_array(
-                flags, index, min_dur, merge_gap
+                flags, index, min_dur, merge_gap,
             )
             if not event_windows:
                 continue
@@ -658,19 +753,15 @@ class BandThresholdDetector(EventDetector):
                 window_baseline = band_baseline[s_idx:e_idx + 1]
                 window_threshold = band_threshold[s_idx:e_idx + 1]
 
-                # Use np.nanmax/np.nanmean: window may contain NaNs at edges
                 with np.errstate(all="ignore"):
                     peak_value = float(np.nanmax(window_values))
                     mean_value = float(np.nanmean(window_values))
                     mean_baseline = float(np.nanmean(window_baseline))
                     mean_threshold = float(np.nanmean(window_threshold))
 
-                # Local index of the peak, for percentile_at_peak
                 local_peak_idx = int(np.nanargmax(window_values))
                 global_peak_idx = s_idx + local_peak_idx
 
-                # Estimate the within-rolling-window percentile that the
-                # peak sits at, using the rolling window ending at the peak.
                 lo = max(0, global_peak_idx - window_rows + 1)
                 hi = global_peak_idx + 1
                 rolling_slice = band_values[lo:hi]
@@ -708,23 +799,30 @@ class BandThresholdDetector(EventDetector):
                 })
                 next_event_id += 1
 
+        # ---- Build diagnostics if requested ---------------------------
+        diagnostics: BandThresholdDiagnostics | None = None
+        if return_diagnostics:
+            diagnostics = BandThresholdDiagnostics(
+                values=working[usable_bands].copy(),
+                baseline=baseline_df[usable_bands].copy(),
+                threshold=threshold_df[usable_bands].copy(),
+            )
+
         if not records:
-            return empty
+            return empty, diagnostics
 
         df = pd.DataFrame(records)
-        # Stable order: by start_time then band_hz
-        df = df.sort_values(["start_time", "band_hz"]).reset_index(drop=True)
-        # Reassign event_id in the new order for cleaner CSVs
+        df = df.sort_values(
+            ["start_time", "band_hz"]
+        ).reset_index(drop=True)
         df["event_id"] = np.arange(1, len(df) + 1, dtype=int)
 
         logger.info(
-            "band_threshold: emitted %d (band, event) row(s) "
-            "across %d band(s)",
-            len(df),
-            df['band_hz'].nunique()
+            "band_threshold: emitted %d (band, event) row(s) across %d band(s)",
+            len(df), df["band_hz"].nunique(),
         )
 
-        return df
+        return df, diagnostics
 
 
 # =========================================================================
@@ -791,7 +889,7 @@ class AdaptiveThresholdLegacyDetector(EventDetector):
         bp = cfg.get(
             "baseline_percentile", self.DEFAULTS["baseline_percentile"]
         )
-        if not isinstance(bp, (int, float)) or not (0 < bp < 100):
+        if not isinstance(bp, (int, float)) or not 0 < bp < 100:
             errors.append(
                 f"{prefix}.baseline_percentile must be in (0, 100); got {bp}"
             )
@@ -1006,7 +1104,7 @@ class PCAAnomalyDetector(EventDetector):
                     f"got {n_comp}"
                 )
         else:
-            if not isinstance(var_exp, (int, float)) or not (0 < var_exp <= 1):
+            if not isinstance(var_exp, (int, float)) or not 0 < var_exp <= 1:
                 errors.append(
                     f"{prefix}.variance_explained must be in (0, 1]; "
                     f"got {var_exp}"
@@ -1016,7 +1114,7 @@ class PCAAnomalyDetector(EventDetector):
             "baseline_trim_percentile",
             self.DEFAULTS["baseline_trim_percentile"],
         )
-        if not isinstance(trim, (int, float)) or not (50 <= trim <= 100):
+        if not isinstance(trim, (int, float)) or not 50 <= trim <= 100:
             errors.append(
                 f"{prefix}.baseline_trim_percentile must be in [50, 100]; "
                 f"got {trim}"
@@ -1025,7 +1123,7 @@ class PCAAnomalyDetector(EventDetector):
         thresh = cfg.get(
             "threshold_percentile", self.DEFAULTS["threshold_percentile"]
         )
-        if not isinstance(thresh, (int, float)) or not (0 < thresh < 100):
+        if not isinstance(thresh, (int, float)) or not 0 < thresh < 100:
             errors.append(
                 f"{prefix}.threshold_percentile must be in (0, 100); "
                 f"got {thresh}"
@@ -1093,7 +1191,7 @@ class PCAAnomalyDetector(EventDetector):
                 "PCA anomaly detector: no complete rows after NaN removal"
             )
 
-        X = working_clean.to_numpy(dtype=np.float64)
+        X = working_clean.to_numpy(dtype=np.float64) #pylint: disable=invalid-name
         if X.shape[0] < 2:
             logger.warning(
                 "PCA anomaly detector: fewer than 2 complete rows; "
@@ -1104,7 +1202,7 @@ class PCAAnomalyDetector(EventDetector):
         band_mean = X.mean(axis=0)
         band_std = X.std(axis=0, ddof=0)
         band_std = np.where(band_std < 1e-12, 1.0, band_std)
-        Z = (X - band_mean) / band_std
+        Z = (X - band_mean) / band_std #pylint: disable=invalid-name
 
         intensity = np.linalg.norm(Z, axis=1)
         trim = float(cfg.get(
@@ -1113,15 +1211,15 @@ class PCAAnomalyDetector(EventDetector):
         ))
         cutoff = np.percentile(intensity, trim)
         baseline_mask = intensity <= cutoff
-        Z_baseline = Z[baseline_mask]
+        Z_baseline = Z[baseline_mask] #pylint: disable=invalid-name
         if Z_baseline.shape[0] < 2:
             raise AnalysisModuleError(
                 f"PCA anomaly detector: insufficient baseline samples "
                 f"({Z_baseline.shape[0]}) after trimming at P{trim}"
             )
 
-        Z_centred = Z_baseline - Z_baseline.mean(axis=0)
-        _, S, Vt = np.linalg.svd(Z_centred, full_matrices=False)
+        Z_centred = Z_baseline - Z_baseline.mean(axis=0) #pylint: disable=invalid-name
+        _, S, Vt = np.linalg.svd(Z_centred, full_matrices=False) #pylint: disable=invalid-name
         eigenvalues = (S ** 2) / max(1, Z_baseline.shape[0] - 1)
         total_var = float(eigenvalues.sum())
 
@@ -1138,7 +1236,7 @@ class PCAAnomalyDetector(EventDetector):
             ))
             n_components = max(1, min(n_comp_cfg, Vt.shape[0]))
 
-        Vk = Vt[:n_components]
+        Vk = Vt[:n_components] #pylint: disable=invalid-name
         explained_var = float(
             eigenvalues[:n_components].sum() / max(total_var, 1e-12)
         )
@@ -1325,6 +1423,92 @@ class EventDetectionAnalysis(AnalysisModule):
                 except ValueError as exc:
                     errors.append(str(exc))
 
+        # --- Per-detector plot blocks ---
+        for i, det_cfg in enumerate(cfg.get("detectors", []) or []):
+            det_type = det_cfg.get("type", f"<index {i}>")
+            if det_type == "band_threshold":
+                prefix = f"event_detection.detectors[{i}, band_threshold]"
+                _validate_plot_block(
+                    module_name=prefix,
+                    cfg=det_cfg,
+                    valid_types={"threshold_diagnostic"},
+                    errors=errors,
+                )
+                td = (det_cfg.get("plot") or {}).get("threshold_diagnostic", {}) or {}
+                if "bands_hz" in td:
+                    bands_hz = td["bands_hz"]
+                    if not isinstance(bands_hz, list) or not bands_hz:
+                        errors.append(
+                            f"{prefix}.plot.threshold_diagnostic.bands_hz must be a "
+                            f"non-empty list"
+                        )
+                    elif not all(isinstance(b, (int, float)) for b in bands_hz):
+                        errors.append(
+                            f"{prefix}.plot.threshold_diagnostic.bands_hz entries "
+                            f"must be numeric"
+                        )
+                if "max_points_per_panel" in td:
+                    mpp = td["max_points_per_panel"]
+                    if not isinstance(mpp, int) or mpp <= 0:
+                        errors.append(
+                            f"{prefix}.plot.threshold_diagnostic."
+                            f"max_points_per_panel must be a positive integer"
+                        )
+
+        # --- Annotated-spectrogram block ---
+        ann = cfg.get("annotated_spectrogram")
+        if ann is not None:
+            if not isinstance(ann, dict):
+                errors.append(
+                    "event_detection.annotated_spectrogram must be a mapping or null"
+                )
+            else:
+                if not isinstance(ann.get("enabled", False), bool):
+                    errors.append(
+                        "event_detection.annotated_spectrogram.enabled must be a boolean"
+                    )
+                include = ann.get("include_detectors")
+                if include is not None and not (
+                    isinstance(include, list)
+                    and all(isinstance(x, str) for x in include)
+                ):
+                    errors.append(
+                        "event_detection.annotated_spectrogram.include_detectors "
+                        "must be null or a list of detector-type strings"
+                    )
+                fmt = ann.get("output_format", "png")
+                if fmt not in {"png", "pdf"}:
+                    errors.append(
+                        f"event_detection.annotated_spectrogram.output_format must be "
+                        f"'png' or 'pdf'; got '{fmt}'"
+                    )
+                time_chunk = ann.get("time_chunk")
+                if time_chunk is not None:
+                    if not isinstance(time_chunk, str):
+                        errors.append(
+                            f"event_detection.annotated_spectrogram.time_chunk "
+                            f"must be a pandas offset alias string (e.g. '1h', "
+                            f"'6h') or null; got "
+                            f"{type(time_chunk).__name__}"
+                        )
+                    else:
+                        try:
+                            pd.tseries.frequencies.to_offset(time_chunk)
+                        except (ValueError, TypeError):
+                            errors.append(
+                                f"event_detection.annotated_spectrogram.time_chunk "
+                                f"'{time_chunk}' is not a valid pandas offset alias"
+                            )
+
+                time_bins = ann.get("time_bins", 12000)
+                if time_bins is not None and (
+                    not isinstance(time_bins, int) or time_bins <= 0
+                ):
+                    errors.append(
+                        f"event_detection.annotated_spectrogram.time_bins must be "
+                        f"a positive integer or null; got {time_bins}"
+                    )
+
         if errors:
             raise ValueError("\n".join(errors))
 
@@ -1339,6 +1523,7 @@ class EventDetectionAnalysis(AnalysisModule):
 
         outputs: list[str] = []
         warnings: list[str] = []
+        events_by_detector: dict[str, pd.DataFrame] = {}
         per_detector_summary: dict[str, dict] = {}
 
         shared_cfg = {k: v for k, v in cfg.items() if k != "detectors"}
@@ -1368,7 +1553,16 @@ class EventDetectionAnalysis(AnalysisModule):
             logger.info("Running event detector: %s", det_type)
 
             try:
-                events_df = detector.detect(base_matrix, det_cfg, shared_cfg)
+                plot_cfg = det_cfg.get("plot") or {}
+                plot_enabled = plot_cfg.get("enabled", False)
+
+                if plot_enabled and hasattr(detector, "detect_with_diagnostics"):
+                    events_df, diagnostics = detector.detect_with_diagnostics( #type: ignore
+                        base_matrix, det_cfg, shared_cfg,
+                    )
+                else:
+                    events_df = detector.detect(base_matrix, det_cfg, shared_cfg)
+                    diagnostics = None
             except AnalysisModuleError:
                 raise
             except Exception as exc:
@@ -1382,6 +1576,18 @@ class EventDetectionAnalysis(AnalysisModule):
             )
             events_df.to_csv(output_file, index=False)
             outputs.append(output_file)
+            events_by_detector[det_type] = events_df
+
+            # Per-detector plots
+            plot_paths, plot_warns = self._generate_detector_plots(
+                det_type=det_type,
+                diagnostics=diagnostics,
+                events_df=events_df,
+                plot_cfg=plot_cfg,
+                output_dir=output_dir,
+            )
+            outputs.extend(plot_paths)
+            warnings.extend(plot_warns)
 
             logger.info(
                 "  detector=%s: %d event row(s) → %s",
@@ -1394,6 +1600,17 @@ class EventDetectionAnalysis(AnalysisModule):
                 "output_file": output_file,
                 "config": det_cfg,
             }
+
+        # Cross-detector annotated spectrogram
+        ann_cfg = cfg.get("annotated_spectrogram") or {}
+        if ann_cfg.get("enabled", False):
+            ann_paths, ann_warns = self._generate_annotated_spectrogram(
+                events_by_detector=events_by_detector,
+                ann_cfg=ann_cfg,
+                output_dir=output_dir,
+            )
+            outputs.extend(ann_paths)
+            warnings.extend(ann_warns)
 
         return AnalysisResult(
             name=self.name,
@@ -1408,6 +1625,242 @@ class EventDetectionAnalysis(AnalysisModule):
             },
             warnings=warnings,
         )
+    
+    def _generate_detector_plots(
+        self,
+        *,
+        det_type: str,
+        diagnostics,  # BandThresholdDiagnostics | None
+        events_df: pd.DataFrame,
+        plot_cfg: dict,
+        output_dir: str,
+    ) -> tuple[list[str], list[str]]:
+        """Produce per-detector plots. Returns (paths, warnings)."""
+        outputs: list[str] = []
+        warnings: list[str] = []
+
+        if not plot_cfg.get("enabled", False):
+            return outputs, warnings
+
+        try:
+            import matplotlib.pyplot as plt
+            from seasound.plotting.event_detection import (
+                BandThresholdDiagnosticPlotter,
+            )
+        except ImportError as exc:
+            msg = f"Event-detection plotting requires matplotlib: {exc}"
+            warnings.append(msg)
+            logger.warning(msg)
+            return outputs, warnings
+
+        types = plot_cfg.get("types", [])
+        output_format = plot_cfg.get("output_format", "png")
+        dpi = plot_cfg.get("dpi", 300)
+
+        for kind in types:
+            try:
+                if kind == "threshold_diagnostic" and det_type == "band_threshold":
+                    if diagnostics is None:
+                        msg = (
+                            f"band_threshold diagnostics unavailable "
+                            f"(no usable bands); skipping {kind} plot."
+                        )
+                        warnings.append(msg)
+                        logger.warning(msg)
+                        continue
+                    kind_cfg = plot_cfg.get(kind, {}) or {}
+                    bands_hz = kind_cfg.get("bands_hz")
+                    if not bands_hz:
+                        msg = f"{kind} plot requires bands_hz; skipped."
+                        warnings.append(msg)
+                        logger.warning(msg)
+                        continue
+                    fig = BandThresholdDiagnosticPlotter(
+                        diagnostics, events_df,
+                    ).per_band(
+                        bands_hz=bands_hz,
+                        max_points_per_panel=kind_cfg.get(
+                            "max_points_per_panel", 5000,
+                        ),
+                    )
+                else:
+                    msg = (
+                        f"Plot type '{kind}' not supported for detector "
+                        f"'{det_type}'; skipped."
+                    )
+                    warnings.append(msg)
+                    logger.warning(msg)
+                    continue
+
+                plot_path = os.path.join(
+                    output_dir,
+                    f"event_detection_{det_type}_{kind}.{output_format}",
+                )
+                fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+                plt.close(fig)
+                outputs.append(plot_path)
+                logger.info("Detector plot: %s", plot_path)
+            except Exception as exc: #pylint: disable=broad-except
+                msg = f"Plot '{kind}' for detector '{det_type}' failed: {exc}"
+                warnings.append(msg)
+                logger.warning(msg)
+
+        return outputs, warnings
+
+
+    def _generate_annotated_spectrogram(
+        self,
+        *,
+        events_by_detector: dict[str, pd.DataFrame],
+        ann_cfg: dict,
+        output_dir: str,
+    ) -> tuple[list[str], list[str]]:
+        """
+        Produce the cross-detector annotated spectrogram.
+
+        Honours ``time_chunk`` in the same way as SpectrogramAnalysis: when
+        set, one figure is produced per non-empty chunk; when null, a single
+        figure spanning the full deployment is produced.
+        """
+        outputs: list[str] = []
+        warnings: list[str] = []
+
+        try:
+            import matplotlib.pyplot as plt
+            from seasound.core.stft import build_stft_matrix
+            from seasound.core.output_layout import (
+                resolve_spectrogram_output_dir,
+            )
+            from seasound.plotting.event_detection import (
+                EventSpectrogramPlotter,
+            )
+        except ImportError as exc:
+            msg = f"Annotated spectrogram requires matplotlib: {exc}"
+            warnings.append(msg)
+            logger.warning(msg)
+            return outputs, warnings
+
+        runtime_ctx = self._get_runtime_context()
+        time_bins = ann_cfg.get("time_bins", 12000)
+        stft_matrix, stft_warns = build_stft_matrix(
+            runtime_ctx, time_bins=time_bins,
+        )
+        warnings.extend(stft_warns)
+        if stft_matrix is None or stft_matrix.empty:
+            msg = (
+                "Annotated spectrogram skipped: STFT data not available. "
+                "Enable the spectrogram analysis or pre-compute STFT and re-run."
+            )
+            warnings.append(msg)
+            logger.warning(msg)
+            return outputs, warnings
+
+        if not isinstance(stft_matrix.index, pd.DatetimeIndex):
+            msg = (
+                "Annotated spectrogram skipped: STFT matrix has no DatetimeIndex."
+            )
+            warnings.append(msg)
+            logger.warning(msg)
+            return outputs, warnings
+
+        target_dir = resolve_spectrogram_output_dir(
+            output_dir, runtime_ctx.get("pipeline_config"), which="annotated",
+        )
+        os.makedirs(target_dir, exist_ok=True)
+
+        # Restrict events to the requested detectors
+        include = ann_cfg.get("include_detectors")
+        if include is not None:
+            events_subset = {
+                k: v for k, v in events_by_detector.items() if k in include
+            }
+        else:
+            events_subset = dict(events_by_detector)
+
+        output_format = ann_cfg.get("output_format", "png")
+        dpi = ann_cfg.get("dpi", 300)
+        time_chunk = ann_cfg.get("time_chunk")
+
+        def _format_ts(ts: pd.Timestamp) -> str:
+            return ts.strftime("%Y%m%dT%H%M%S")
+
+        def _iter_time_chunks():
+            """Yield (window_start, window_end, stft_slice) per non-empty chunk."""
+            if time_chunk is None:
+                yield (
+                    stft_matrix.index.min(),
+                    stft_matrix.index.max(),
+                    stft_matrix,
+                )
+                return
+            for _, group in stft_matrix.resample(time_chunk):
+                if group.empty:
+                    continue
+                yield group.index.min(), group.index.max(), group
+
+        # Sequential chunk index — matches SpectrogramAnalysis's filename scheme
+        for i, (window_start, window_end, stft_slice) in enumerate(
+            _iter_time_chunks()
+        ):
+            try:
+                chunk_events = self._filter_events_to_window(
+                    events_subset, window_start, window_end,
+                )
+                fig = EventSpectrogramPlotter(stft_slice, chunk_events).plot(
+                    freq_range=ann_cfg.get("freq_range"),
+                    db_range=ann_cfg.get("db_range"),
+                    colormap=ann_cfg.get("colormap"),
+                    preserve_time_gaps=ann_cfg.get("preserve_time_gaps", True),
+                    annotation_styles=ann_cfg.get("annotation_styles"),
+                    annotation_label=ann_cfg.get("annotation_label", False),
+                )
+                if time_chunk is None:
+                    filename = f"annotated_spectrogram.{output_format}"
+                else:
+                    s = _format_ts(window_start)
+                    e = _format_ts(window_end)
+                    filename = (
+                        f"annotated_spectrogram_{i:04d}_{s}_{e}.{output_format}"
+                    )
+                plot_path = os.path.join(target_dir, filename)
+                fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+                plt.close(fig)
+                outputs.append(plot_path)
+                logger.info("Annotated spectrogram: %s", plot_path)
+            except Exception as exc: #pylint disable=broad-exception-caught
+                msg = (
+                    f"Annotated spectrogram chunk "
+                    f"({window_start} → {window_end}) failed: {exc}"
+                )
+                warnings.append(msg)
+                logger.warning(msg)
+
+        return outputs, warnings
+
+    @staticmethod
+    def _filter_events_to_window(
+        events_by_detector: dict[str, pd.DataFrame],
+        window_start: pd.Timestamp,
+        window_end: pd.Timestamp,
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Return a copy of events_by_detector with each DataFrame filtered to
+        events that overlap [window_start, window_end].
+
+        Overlap rule: event.end_time >= window_start AND event.start_time
+        <= window_end. Events spanning chunk boundaries appear on both
+        adjacent chunks (they are not split).
+        """
+        out: dict[str, pd.DataFrame] = {}
+        for det, df in events_by_detector.items():
+            if df is None or df.empty:
+                out[det] = df
+                continue
+            starts = pd.to_datetime(df["start_time"])
+            ends = pd.to_datetime(df["end_time"])
+            mask = (ends >= window_start) & (starts <= window_end)
+            out[det] = df[mask]
+        return out
 
 
 # =========================================================================

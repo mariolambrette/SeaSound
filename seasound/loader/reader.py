@@ -10,7 +10,7 @@ strategies. Returns AudioSegment objects ready for calibration.
 import os
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
@@ -68,6 +68,55 @@ class AudioSegment:
     channel: int
     source_file: str
 
+
+# ---------------------------------------------------------------------------
+# Per-file start trim
+# ---------------------------------------------------------------------------
+
+
+def _apply_start_trim(
+    audio_data: np.ndarray,
+    sample_rate: int,
+    datetime_start: Optional[datetime],
+    trim_s: float,
+    filepath: str,
+) -> tuple[np.ndarray, Optional[datetime]]:
+    """
+    Trim ``trim_s`` seconds from the start of ``audio_data`` and shift
+    ``datetime_start`` forward by the exact rounded sample count.
+
+    Returns ``(trimmed_audio, shifted_datetime_start)``. If ``trim_s <= 0``
+    the inputs are returned unchanged. If the file is shorter than the
+    requested trim, an empty audio array is returned (with a warning) so
+    the downstream channel-strategy branching still produces a
+    well-formed segment.
+
+    Slicing along axis 0 is used directly, so the helper is correct for
+    both 1-D (mono) and 2-D (multi-channel) input arrays.
+    """
+    if trim_s <= 0:
+        return audio_data, datetime_start
+
+    n_trim = int(round(trim_s * sample_rate))
+    if n_trim >= len(audio_data):
+        logger.warning(
+            "per_file_trim_start_s=%.3fs exceeds file duration for %s "
+            "(%d samples available); returning empty audio.",
+            trim_s, os.path.basename(filepath), len(audio_data),
+        )
+        return audio_data[:0], datetime_start
+
+    trimmed = audio_data[n_trim:]
+    actual_trim_s = n_trim / sample_rate
+    if datetime_start is not None:
+        datetime_start = datetime_start + timedelta(seconds=actual_trim_s)
+    logger.debug(
+        "Trimmed %.3fs from start of %s",
+        actual_trim_s, os.path.basename(filepath),
+    )
+    return trimmed, datetime_start
+
+
 # ---------------------------------------------------------------------------
 # Main reader
 # ---------------------------------------------------------------------------
@@ -116,7 +165,7 @@ def read_audio(
     try:
         audio_data, sample_rate = sf.read(filepath, dtype="float64") # pyright: ignore[reportPossiblyUnboundVariable] - handled by import checks.
     except Exception as exc:
-        raise ReaderError(f"Could not read {filepath}: {exc}")
+        raise ReaderError(f"Could not read {filepath}: {exc}") from exc
 
     # --- Extract metadata from filename ---
     if parser is None:
@@ -131,10 +180,17 @@ def read_audio(
         serial = config.serial_override
 
     logger.info(
-        f"Read {os.path.basename(filepath)}: "
-        f"{sample_rate} Hz, "
-        f"{'stereo' if audio_data.ndim > 1 else 'mono'}, "
-        f"{len(audio_data) / sample_rate:.1f}s"
+        "Read %s: %s Hz, %s, %.1fs",
+        os.path.basename(filepath),
+        sample_rate,
+        "stereo" if audio_data.ndim > 1 else "mono",
+        len(audio_data) / sample_rate,
+    )
+
+    # --- Apply per-file start trim (before channel branching) ---
+    audio_data, dt_start = _apply_start_trim(
+        audio_data, sample_rate, dt_start,
+        config.per_file_trim_start_s, filepath,
     )
 
     # --- Apply channel strategy ---

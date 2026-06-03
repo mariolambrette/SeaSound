@@ -14,10 +14,10 @@ import logging
 import time as time_module
 from datetime import datetime, timedelta, timezone
 from multiprocessing import Pool, cpu_count
-from functools import partial
+from functools import partial #pylint: disable=unused-import
 from typing import Optional
 
-import numpy as np
+import numpy as np #pylint: disable=unused-import
 import pandas as pd
 
 import seasound
@@ -27,16 +27,16 @@ from seasound.core.exceptions import SeaSoundError
 from seasound.loader.reader import read_audio
 from seasound.loader.calibration import load_calibration, apply_calibration
 from seasound.loader.base_matrix import compute_base_matrix
-from seasound.loader.cache import (
+from seasound.loader.cache import ( #pylint: disable=unused-import
     is_cached,
     save_base_matrix,
-    load_base_matrix,
+    load_base_matrix, #pylint: disable=unused-import
     load_all_cached,
     load_cached_for_sources,
-)
+) #pylint: disable=unused-import
 from seasound.loader.filename_parsers import FilenameParser, get_parser
 from seasound.loader.metadata_readers import get_metadata_reader
-from seasound.loader.loaded_artifacts import SegmentArtifact, LoadingOutput
+from seasound.loader.loaded_artifacts import SegmentArtifact, LoadingOutput #pylint: disable=unused-import
 
 from seasound.analysis.calculate_stft import get_stft_for_file
 
@@ -59,8 +59,9 @@ def find_audio_files(config: PipelineConfig) -> list[str]:
 
     if not files:
         logger.warning(
-            f"No files matching '{config.input.pattern}' "
-            f"found in {config.input.path}"
+            "No files matching '%s' found in %s",
+            config.input.pattern,
+            config.input.path
         )
 
     return files
@@ -92,20 +93,22 @@ def _resolve_raw_bounds(
 
         try:
             return pd.Timestamp(start_raw), pd.Timestamp(end_raw)
-        except Exception as exc:
+        except Exception as exc: #pylint: disable=broad-except
             logger.warning(
-                f"Could not parse manual clip datetimes ({exc}); "
-                "proceeding without clipping"
+                "Could not parse manual clip datetimes (%s); "
+                "proceeding without clipping",
+                exc
             )
             return None, None
 
     if method == "metadata":
         try:
             return _load_clip_from_metadata(config)
-        except Exception as exc:
+        except Exception as exc: #pylint: disable=broad-except
             logger.warning(
-                f"Could not resolve metadata clip bounds ({exc}); "
-                "proceeding without clipping"
+                "Could not resolve metadata clip bounds (%s); "
+                "proceeding without clipping",
+                exc
             )
             return None, None
 
@@ -154,7 +157,7 @@ def get_clip_bounds(
     if clip_start is None:
         logger.info("No clipping applied; using full dataset")
     else:
-        logger.info(f"Clip window: {clip_start} → {clip_end}")
+        logger.info("Clip window: %s → %s", clip_start, clip_end)
 
     return clip_start, clip_end
 
@@ -201,7 +204,7 @@ def _process_one_file(
         try:
             get_stft_for_file(wav_path, config, cache_dir)
         except Exception as exc:
-            logger.error(f"STFT caching failed for {wav_path}: {exc}")
+            logger.error("STFT caching failed for %s: %s", wav_path, exc)
             raise
     
     segments = read_audio(wav_path, config.input, parser=parser)
@@ -608,10 +611,99 @@ def run_pipeline(config: PipelineConfig) -> None:
     write_manifest(config, input_files, config.output.directory, elapsed, analysis_results)
 
     logger.info("=" * 60)
-    logger.info(f"Pipeline complete ({timedelta(seconds=int(elapsed))})")
-    logger.info(f"Output: {config.output.directory}")
+    logger.info("Pipeline complete (%s)", timedelta(seconds=int(elapsed)))
+    logger.info("Output: %s", config.output.directory)
     logger.info("=" * 60)
 
+def run_plot_mode(
+    kind: str,
+    csv_path: str,
+    output_path: str | None,
+    config_path: str | None,
+) -> None:
+    """
+    Standalone plot mode: read a CSV produced by an analysis module and
+    write a plot.
+
+    Parameters
+    ----------
+    kind : str
+        Analysis name; currently 'ltsa' or 'spectral_percentiles'.
+    csv_path : str
+        Path to the analysis output CSV.
+    output_path : str, optional
+        Path for the output image. If None, defaults to a sibling of the
+        input CSV named '<csv_stem>_<plot_kind>.png'.
+    config_path : str, optional
+        If given, read the matching `analyses.<kind>.config.plot` block to
+        configure the plot. Otherwise built-in defaults are used.
+    """
+    import os
+    import matplotlib.pyplot as plt
+
+    if not os.path.isfile(csv_path):
+        raise SeaSoundError(f"Input CSV not found: {csv_path}")
+
+    # --- Load optional plot config from YAML ---
+    plot_cfg: dict = {}
+    if config_path:
+        try:
+            from seasound.core.config import load_yaml
+            raw = load_yaml(config_path)
+            an = raw.get("analyses", {}).get(kind, {}) or {}
+            plot_cfg = (an.get("config", {}) or {}).get("plot", {}) or {}
+        except Exception as exc:
+            logger.warning(
+                f"Could not load plot config from {config_path}: {exc}; "
+                f"using defaults."
+            )
+
+    # --- Build plotter and figure ---
+    if kind == "ltsa":
+        from seasound.plotting.ltsa import LTSAPlotter
+        df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+        plotter = LTSAPlotter(df)
+
+        types = plot_cfg.get("types", ["heatmap"])
+        plot_kind = types[0]
+        kind_cfg = plot_cfg.get(plot_kind, {}) or {}
+        if plot_kind == "heatmap":
+            fig = plotter.heatmap(**kind_cfg)
+        elif plot_kind == "band_timeseries":
+            fig = plotter.band_timeseries(**kind_cfg)
+        else:
+            raise SeaSoundError(f"Unknown LTSA plot kind: '{plot_kind}'")
+
+    elif kind == "spectral_percentiles":
+        from seasound.plotting.spectral_percentiles import (
+            SpectralPercentilesPlotter,
+        )
+        df = pd.read_csv(csv_path)
+        plotter = SpectralPercentilesPlotter(df)
+
+        types = plot_cfg.get("types", ["curves"])
+        plot_kind = types[0]
+        kind_cfg = plot_cfg.get(plot_kind, {}) or {}
+        if plot_kind == "curves":
+            fig = plotter.curves(**kind_cfg)
+        else:
+            raise SeaSoundError(
+                f"Unknown spectral_percentiles plot kind: '{plot_kind}'"
+            )
+
+    else:
+        raise SeaSoundError(f"Unsupported plot kind: '{kind}'")
+
+    # --- Resolve output path and save ---
+    if output_path is None:
+        base = os.path.splitext(os.path.basename(csv_path))[0]
+        directory = os.path.dirname(csv_path) or "."
+        output_path = os.path.join(directory, f"{base}_{plot_kind}.png")
+
+    dpi = plot_cfg.get("dpi", 300)
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"Plot written: {output_path}")
 
 def cli_main():
     """CLI entry point (called by the `seasound` command)."""
@@ -622,7 +714,17 @@ def cli_main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--config", required=True, help="Path to YAML configuration file"
+        "--config", 
+        help="Path to YAML configuration file (required for pipeline modes)"
+    )
+    parser.add_argument(
+        "--plot",
+        choices=["ltsa", "spectral_percentiles"],
+        help=(
+            "Standalone plot mode: generate a plot from an existing CSV and "
+            "exit. Use with --input <csv_path>. Optional: --output <png_path> "
+            "and --config <yaml> to read the matching plot block."
+        ),
     )
     parser.add_argument("--input", help="Override input.path")
     parser.add_argument("--output", help="Override output.directory")
@@ -666,6 +768,26 @@ def cli_main():
     # Setup logging
     setup_logging(args.log_level)
 
+    # --- Standalone plot mode ---
+    if args.plot:
+        if args.load_only or args.analyse_only or args.dry_run:
+            print("Error: --plot is mutually exclusive with --load-only, "
+                "--analyse-only, and --dry-run")
+            raise SystemExit(1)
+        if not args.input:
+            print("Error: --plot requires --input <csv_path>")
+            raise SystemExit(1)
+        try:
+            return run_plot_mode(
+                kind=args.plot,
+                csv_path=args.input,
+                output_path=args.output,
+                config_path=args.config,
+            )
+        except SeaSoundError as exc:
+            logger.error(f"\nPlot error: {exc}")
+            raise SystemExit(1)   
+
     # List analyses if requested
     if args.list_analyses:
         from seasound.analysis.registry import list_registered
@@ -677,6 +799,10 @@ def cli_main():
         else:
             print("No analysis modules registered")
         return
+
+    if not args.config:
+        print("Error: --config is required (or use --plot / --list-analyses)")
+        raise SystemExit(1)
 
     # Load config
     try:

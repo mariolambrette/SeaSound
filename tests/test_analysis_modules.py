@@ -104,6 +104,28 @@ class TestLTSAAnalysis:
         assert observed == pytest.approx(expected, abs=1e-3)
         assert observed != pytest.approx(85.0, abs=1e-6)
 
+    def test_ltsa_with_plot_enabled_produces_png(
+        self, synthetic_base_matrix, tmp_path,
+    ):
+        module = LTSAAnalysis()
+        cfg = {
+            "time_resolution": "10min",
+            "statistic": "median",
+            "plot": {
+                "enabled": True,
+                "types": ["heatmap"],
+                "heatmap": {"db_range": [60, 100]},
+                "output_format": "png",
+                "dpi": 100,
+            },
+        }
+        result = module.run(synthetic_base_matrix, cfg, str(tmp_path))
+        csvs = [p for p in result.outputs if p.endswith(".csv")]
+        pngs = [p for p in result.outputs if p.endswith(".png")]
+        assert len(csvs) == 1
+        assert len(pngs) == 1
+        assert result.summary["plots_generated"] == 1
+
 
 class TestTOBLevelsAnalysis:
     """Tests for TOB Levels module."""
@@ -208,6 +230,25 @@ class TestSpectralPercentilesAnalysis:
         assert "window_start" in df.columns
         assert "window_end" in df.columns
         assert len(df) == 6  # 1 hour / 10 min
+
+    def test_spectral_percentiles_with_plot_enabled_produces_png(
+        self, synthetic_base_matrix, tmp_path,
+    ):
+        module = SpectralPercentilesAnalysis()
+        cfg = {
+            "percentiles": [5, 50, 95],
+            "window": "full",
+            "plot": {
+                "enabled": True,
+                "types": ["curves"],
+                "curves": {"shaded_band": True},
+                "output_format": "png",
+                "dpi": 100,
+            },
+        }
+        result = module.run(synthetic_base_matrix, cfg, str(tmp_path))
+        pngs = [p for p in result.outputs if p.endswith(".png")]
+        assert len(pngs) == 1
 
 
 class TestSpectrogramAnalysis:
@@ -362,3 +403,4 @@ class TestAnalysisRegistry:
     def test_get_analysis_unknown_raises(self):
         with pytest.raises(ValueError):
             get_analysis("nonexistent_module")
+

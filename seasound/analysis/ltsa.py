@@ -7,17 +7,18 @@ summary statistics per frequency band.
 
 import os
 import logging
-from typing import Literal
+from typing import Literal #pylint: disable=unused-import
 
 import pandas as pd
 import numpy as np
 
 from seasound.analysis.base import (
     AnalysisModule,
-    AnalysisResult, 
+    AnalysisResult,
     AnalysisModuleError,
 )
 from seasound.analysis.registry import register_analysis
+from seasound.plotting._common import _validate_plot_block
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class LTSAAnalysis(AnalysisModule):
 
     name = "ltsa"
 
-    
+
     def validate_config(self, cfg: dict) -> None:
         """
         Validate LTSA configuration.
@@ -73,7 +74,7 @@ class LTSAAnalysis(AnalysisModule):
                 f"ltsa.config.statistic must be one of {valid_stats}; "
                 f"got '{statistic}'"
             )
-        
+
         freq_range = cfg.get("freq_range")
         if freq_range is not None:
             if not isinstance(freq_range, (list, tuple)) or len(freq_range) != 2:
@@ -90,17 +91,38 @@ class LTSAAnalysis(AnalysisModule):
                     f"ltsa.config.freq_range must be [min, max] with min < max; "
                     f"got [{freq_range[0]}, {freq_range[1]}]"
                 )
-        
+
         output_format = cfg.get("output_format", "csv")
         if output_format not in {"csv"}:
             errors.append(
                 f"ltsa.config.output_format must be 'csv'; got '{output_format}'"
             )
-        
+
+        # --- Plot block (optional) ---
+        _validate_plot_block(
+            module_name="ltsa",
+            cfg=cfg,
+            valid_types={"heatmap", "band_timeseries"},
+            errors=errors,
+        )
+        plot_cfg = cfg.get("plot") or {}
+        if "band_timeseries" in (plot_cfg.get("types") or []):
+            bt = plot_cfg.get("band_timeseries", {}) or {}
+            bands_hz = bt.get("bands_hz")
+            if not isinstance(bands_hz, list) or not bands_hz:
+                errors.append(
+                    "ltsa.config.plot.band_timeseries.bands_hz must be a non-empty "
+                    "list of numeric frequencies when 'band_timeseries' is in "
+                    "plot.types"
+                )
+            elif not all(isinstance(b, (int, float)) for b in bands_hz):
+                errors.append(
+                    "ltsa.config.plot.band_timeseries.bands_hz entries must be numeric"
+                )
+
         if errors:
             raise ValueError("\n".join(errors))
-        
-    
+
     def run(
         self,
         base_matrix: pd.DataFrame,
@@ -108,7 +130,7 @@ class LTSAAnalysis(AnalysisModule):
         output_dir: str,
     ) -> AnalysisResult:
         """
-        Exeute LTSA analysis.
+        Execute LTSA analysis.
 
         resamplesbase_matrix to time_resolution, applies statistic, and writes
         result CSV.
@@ -139,41 +161,104 @@ class LTSAAnalysis(AnalysisModule):
                 aggregated = work_matrix.resample(time_resolution).std()
             else:
                 raise AnalysisModuleError(f"Unknown statistic: {statistic}")
-            
-            # Write output
+
+            # Write CSV
             os.makedirs(output_dir, exist_ok=True)
             output_file = os.path.join(output_dir, "ltsa.csv")
             aggregated.to_csv(output_file)
-            logger.info(f"LTSA output: {output_file} ({len(aggregated)} rows)")
+            logger.info("LTSA output: %s (%d rows)", output_file, len(aggregated))
+
+            # Generate plots if configured
+            plot_outputs, plot_warnings = self._generate_plots(
+                aggregated, cfg.get("plot") or {}, output_dir,
+            )
 
             return AnalysisResult(
                 name=self.name,
-                outputs=[output_file],
+                outputs=[output_file] + plot_outputs,
                 summary={
                     "n_time_bins": len(aggregated),
                     "n_frequencies": len(aggregated.columns),
                     "time_resolution": time_resolution,
                     "statistic": statistic,
-                    "time_range": f"{aggregated.index.min()} to {aggregated.index.max()}",
+                    "time_range": (
+                        f"{aggregated.index.min()} to {aggregated.index.max()}"
+                    ),
+                    "plots_generated": len(plot_outputs),
                 },
-                warnings=[],
+                warnings=plot_warnings,
             )
 
         except AnalysisModuleError:
             raise
         except Exception as exc:
-            raise AnalysisModuleError(f"LTSA analysis failed: {exc}")
+            raise AnalysisModuleError(f"LTSA analysis failed: {exc}") from exc
 
 
     # --- Helper methods ---
     def _compute_linear_mean(
-        self, work_matrix: pd.DataFrame, 
+        self, work_matrix: pd.DataFrame,
         time_resolution: str,
     ) -> pd.DataFrame:
         """Compute mean in linear power domain, then convert back to dB."""
         linear_power = 10 ** (work_matrix / 10)
         aggregated_linear = linear_power.resample(time_resolution).mean()
         return aggregated_linear.apply(lambda col: 10 * np.log10(col))
+
+    def _generate_plots(
+        self,
+        aggregated: pd.DataFrame,
+        plot_cfg: dict,
+        output_dir: str,
+    ) -> tuple[list[str], list[str]]:
+        """
+        Produce LTSA plots according to plot_cfg. Returns (output_paths, warnings).
+
+        Failures are logged and recorded as warnings but never abort the run.
+        """
+        outputs: list[str] = []
+        warnings: list[str] = []
+
+        if not plot_cfg.get("enabled", False):
+            return outputs, warnings
+
+        try:
+            from seasound.plotting.ltsa import LTSAPlotter
+            import matplotlib.pyplot as plt
+        except ImportError as exc:
+            warnings.append(f"LTSA plotting requires matplotlib: {exc}")
+            logger.warning(warnings[-1])
+            return outputs, warnings
+
+        plotter = LTSAPlotter(aggregated)
+        types = plot_cfg.get("types", ["heatmap"])
+        output_format = plot_cfg.get("output_format", "png")
+        dpi = plot_cfg.get("dpi", 300)
+
+        for kind in types:
+            kind_cfg = plot_cfg.get(kind, {}) or {}
+            try:
+                if kind == "heatmap":
+                    fig = plotter.heatmap(**kind_cfg)
+                elif kind == "band_timeseries":
+                    fig = plotter.band_timeseries(**kind_cfg)
+                else:
+                    warnings.append(f"Unknown LTSA plot type '{kind}'; skipped.")
+                    logger.warning(warnings[-1])
+                    continue
+
+                plot_path = os.path.join(
+                    output_dir, f"ltsa_{kind}.{output_format}"
+                )
+                fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+                plt.close(fig)
+                outputs.append(plot_path)
+                logger.info("LTSA plot: %s", plot_path)
+            except Exception as exc: #pylint: disable=broad-except
+                warnings.append(f"LTSA plot '{kind}' failed: {exc}")
+                logger.warning(warnings[-1])
+
+        return outputs, warnings
 
 
 register_analysis("ltsa", LTSAAnalysis)
