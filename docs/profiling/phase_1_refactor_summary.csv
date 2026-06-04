@@ -1,0 +1,2 @@
+label,exit_code,wall_clock_s,n_logical_cores,machine_ram_gb,peak_total_mem_gb,coordinator_peak_mem_mb,max_worker_peak_mem_mb,sequential_floor_mem_gb,peak_cores_busy,mean_cores_busy,core_hours,codecarbon_kwh_ESTIMATE,watts_per_core_kwh_ESTIMATE
+phase_1_refactor,1,34.4,32,274.2,0.525,6.3,518.6,0.525,1.27,0.86,0.0081,0.00089,0.00018

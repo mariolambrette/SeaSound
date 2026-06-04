@@ -88,11 +88,10 @@ class FilenameParser(ABC):
             Always returns a FileMetadata instance. Fields that
             cannot be parsed are set to None.
         """
-        ...
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name='{self.name}')"
-    
+
 
 # ---------------------------------------------------------------------------
 # Implementations
@@ -129,9 +128,9 @@ class SoundTrapParser(FilenameParser):
                 pass
 
         if serial is None:
-            logger.warning(f"Could not extract serial from {basename}")
+            logger.warning("Could not extract serial from %s", basename)
         if dt is None:
-            logger.warning(f"Could not extract datetime from {basename}")
+            logger.warning("Could not extract datetime from %s", basename)
 
         return FileMetadata(serial=serial, datetime_start=dt)
 
@@ -167,9 +166,9 @@ class WildlifeParser(FilenameParser):
                 pass
 
         if serial is None:
-            logger.warning(f"Could not extract serial from {basename}")
+            logger.warning("Could not extract serial from %s", basename)
         if dt is None:
-            logger.warning(f"Could not extract datetime from {basename}")
+            logger.warning("Could not extract datetime from %s", basename)
 
         return FileMetadata(serial=serial, datetime_start=dt)
 
@@ -202,9 +201,9 @@ class IcListenParser(FilenameParser):
                 pass
 
         if serial is None:
-            logger.warning(f"Could not extract serial from {basename}")
+            logger.warning("Could not extract serial from %s", basename)
         if dt is None:
-            logger.warning(f"Could not extract datetime from {basename}")
+            logger.warning("Could not extract datetime from %s", basename)
 
         return FileMetadata(serial=serial, datetime_start=dt)
 
@@ -245,7 +244,7 @@ class CustomParser(FilenameParser):
 
         if match is None:
             logger.warning(
-                f"Custom regex did not match {basename}"
+                "Custom regex did not match %s", basename
             )
             return FileMetadata()
 
@@ -259,8 +258,9 @@ class CustomParser(FilenameParser):
                 dt = datetime.strptime(dt_str, self.datetime_format)
             except ValueError:
                 logger.warning(
-                    f"Could not parse datetime '{dt_str}' with "
-                    f"format '{self.datetime_format}'"
+                    "Could not parse datetime '%s' with format '%s'",
+                    dt_str,
+                    self.datetime_format
                 )
 
         return FileMetadata(serial=serial, datetime_start=dt)
@@ -291,14 +291,14 @@ class ManualMetadataParser(FilenameParser):
                 try:
                     self.dt = datetime.fromisoformat(start_datetime)
                 except ValueError:
-                    raise ConfigError(
+                    raise ConfigError( #pylint: disable=raise-missing-from
                         f"Could not parse start_datetime '{start_datetime}'. "
                         f"Use format: YYYY-MM-DD HH:MM:SS"
                     )
 
     def parse(self, filepath: str) -> FileMetadata:
         return FileMetadata(serial=self.serial, datetime_start=self.dt)
-    
+
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -346,12 +346,12 @@ def get_parser(config: InputConfig) -> FilenameParser:
     if fmt == "custom":
         return parser(
             regex=getattr(config, "custom_regex", None), # pyright: ignore[reportCallIssue]
-            datetime_format=getattr(config, "custom_datetime_format", None), # pyright: ignore[reportCallIssue]
+            datetime_format=getattr(config, "custom_datetime_format", None), # pyright: ignore[reportCallIssue] #pylint: disable=line-too-long
         )
     elif fmt == "manual":
         return parser(
             serial=getattr(config, "serial_override", None), # pyright: ignore[reportCallIssue]
-            start_datetime=getattr(config, "start_datetime", None), # pyright: ignore[reportCallIssue]
+            start_datetime=getattr(config, "start_datetime", None), # pyright: ignore[reportCallIssue] #pylint: disable=line-too-long
         )
     else:
         return parser()

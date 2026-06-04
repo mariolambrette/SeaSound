@@ -113,7 +113,15 @@ def compute_base_matrix(
 
     # --- FFT parameters ---
     nperseg = bin_samples
-    nfft = 4 * nperseg  # 4× zero-padding per JOMOPANS
+    # 4x zero-padding per JOMOPANS at the default. DO NOT CHANGE
+    # nfft_padding_factor if outputs must stay comparable across
+    # runs/deployments — it alters the numerics of every band estimate.
+    nfft = config.nfft_padding_factor * nperseg
+
+    # Spectrogram compute dtype, controlled by casting the input block.
+    # "float32" matches the float32 golden baseline. DO NOT CHANGE if
+    # outputs must stay comparable — float64 alters the last bits.
+    sxx_np_dtype = np.float64 if config.sxx_dtype == "float64" else np.float32
 
     # --- Chunked processing for memory efficiency ---
     chunk_duration_s = 300  # 5 minutes
@@ -138,13 +146,17 @@ def compute_base_matrix(
         # Slice audio for this chunk
         sample_start = bin_start * bin_samples
         sample_end = bin_end * bin_samples
-        audio_chunk = audio_trimmed[sample_start:sample_end]
+        # np.asarray is copy-free when the dtype already matches, so the
+        # float32 default is bit-identical to the pre-config behaviour.
+        audio_chunk = np.asarray(
+            audio_trimmed[sample_start:sample_end], dtype=sxx_np_dtype
+        )
 
         # scipy.signal.spectrogram computes the STFT efficiently
         # - window='hann' applies the Hann window per segment
         # - noverlap=0 means non-overlapping segments (one per time bin)
         # - scaling='density' gives PSD in Pa²/Hz
-        freqs, _, Sxx = signal.spectrogram( #pylint: disable=invalid-name
+        freqs, _, Sxx = signal.spectrogram( #pylint: disable=unbalanced-tuple-unpacking
             audio_chunk,
             fs=sample_rate,
             window="hann",

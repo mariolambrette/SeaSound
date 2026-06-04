@@ -45,8 +45,10 @@ class AudioSegment:
     Attributes
     ----------
     data : np.ndarray
-        Audio samples as float64 in range [-1, 1]. This is the
-        normalised format returned by soundfile — NOT in physical
+        Audio samples as float32 in range [-1, 1]. This is the
+        normalised format returned by soundfile (read with
+        dtype="float32" — the Stage 0 memory optimisation and the
+        golden-baseline numeric format) — NOT in physical
         units yet. Calibration converts these to Pascals.
     sample_rate : int
         Sample rate in Hz (e.g. 96000, 144000, 384000).
@@ -163,7 +165,7 @@ def read_audio(
 
     # --- Read the file ---
     try:
-        audio_data, sample_rate = sf.read(filepath, dtype="float32") # pyright: ignore[reportPossiblyUnboundVariable] - handled by import checks.
+        audio_data, sample_rate = sf.read(filepath, dtype="float32") # pyright: ignore[reportPossiblyUnboundVariable] #pylint: disable=line-too-long
     except Exception as exc:
         raise ReaderError(f"Could not read {filepath}: {exc}") from exc
 

@@ -122,6 +122,11 @@ class ProcessingConfig:
     reference_pressure_pa: float = 1e-6
     domain: str = "underwater"
     missing_band_strategy: str = "nan"
+    # Base-matrix numeric levers. Defaults reproduce the float32 golden
+    # baseline; DO NOT CHANGE either if outputs must stay comparable
+    # across runs and deployments (both alter the numerics).
+    nfft_padding_factor: int = 4   # JOMOPANS 4x zero-padding
+    sxx_dtype: str = "float32"     # "float32" | "float64"
     cache_base_matrix: bool = True
     cache_directory: Optional[str] = None
 
@@ -332,6 +337,16 @@ def validate(raw: dict) -> PipelineConfig:
     if config.pipeline.max_freq_hz <= config.pipeline.min_freq_hz:
         errors.append(
             "pipeline.max_freq_hz must be greater than pipeline.min_freq_hz"
+        )
+
+    if config.pipeline.nfft_padding_factor < 1:
+        errors.append("pipeline.nfft_padding_factor must be >= 1")
+
+    valid_sxx_dtypes = {"float32", "float64"}
+    if config.pipeline.sxx_dtype not in valid_sxx_dtypes:
+        errors.append(
+            f"pipeline.sxx_dtype must be one of: "
+            f"{', '.join(sorted(valid_sxx_dtypes))}"
         )
 
     # --- Deployment validation ---

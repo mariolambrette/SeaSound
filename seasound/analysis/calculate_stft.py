@@ -22,7 +22,7 @@ from typing import Any
 from seasound.core.config import PipelineConfig
 from seasound.loader.reader import read_audio
 from seasound.loader.filename_parsers import get_parser
-from seasound.loader.calibration import load_calibration, apply_calibration
+from seasound.loader.calibration import load_calibration, resolve_calibration
 from seasound.loader.stft import compute_stft_power
 from seasound.loader.cache import load_stft_npz, save_stft_npz
 
@@ -95,7 +95,11 @@ def get_stft_for_file(
                     pass
 
         if need_compute:
-            audio_pa, _ = apply_calibration(seg, cal_df, config.calibration)
+            # In-place calibration: seg.data is this function's own read
+            # and is not reused after this point, so mutating it avoids
+            # a second full-length copy of the audio.
+            resolved = resolve_calibration(seg, cal_df, config.calibration)
+            audio_pa = resolved.apply_inplace(seg.data)
             freqs_hz, times_s, power = compute_stft_power(
                 audio_pa=audio_pa,
                 sample_rate=seg.sample_rate,

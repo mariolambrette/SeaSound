@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.figure import Figure
 
-from seasound.plotting._common import (
+from seasound.plotting._common import ( #pylint: disable=unused-import
     compute_grid_dims,
     format_time_label,
     subsample_evenly,
