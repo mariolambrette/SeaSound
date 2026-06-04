@@ -47,6 +47,7 @@ tests/test_band_threshold_diagnostics.py
 tests/test_base_matrix.py
 tests/test_calculate_stft.py
 tests/test_calibration.py
+tests/test_characterisation_legacy.py
 tests/test_core_stft.py
 tests/test_event_detection.py
 tests/test_event_detection_plot_integration.py

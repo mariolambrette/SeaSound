@@ -23,7 +23,7 @@ inside them, producing smoother and more stable estimates.
 """
 
 import logging
-from datetime import timedelta
+from datetime import timedelta #pylint: disable=unused-import
 
 import numpy as np
 import pandas as pd
@@ -103,10 +103,11 @@ def compute_base_matrix(
 
     if n_bins == 0:
         logger.warning(
-            f"Audio shorter than {resolution_s}s — cannot compute base matrix"
+            "Audio shorter than %ss — cannot compute base matrix",
+            resolution_s,
         )
         return pd.DataFrame(columns=freq_column_names(all_centres))
-    
+
     # Trim to exact number of bins
     audio_trimmed = audio_pa[: n_bins * bin_samples]
 
@@ -123,9 +124,11 @@ def compute_base_matrix(
     ltsa = np.full((len(reachable_centres), n_bins), np.nan)
 
     logger.info(
-        f"Computing base matrix: {n_bins} × {resolution_s}s bins, "
-        f"{len(reachable_centres)} TOB bands, "
-        f"{n_chunks} chunk(s)"
+        "Computing base matrix: %s × %ss bins, %s TOB bands, %s chunk(s)",
+        n_bins,
+        resolution_s,
+        len(reachable_centres),
+        n_chunks,
     )
 
     for chunk_idx in range(n_chunks):
@@ -141,7 +144,7 @@ def compute_base_matrix(
         # - window='hann' applies the Hann window per segment
         # - noverlap=0 means non-overlapping segments (one per time bin)
         # - scaling='density' gives PSD in Pa²/Hz
-        freqs, _, Sxx = signal.spectrogram(
+        freqs, _, Sxx = signal.spectrogram( #pylint: disable=invalid-name
             audio_chunk,
             fs=sample_rate,
             window="hann",

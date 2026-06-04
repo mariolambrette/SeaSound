@@ -19,7 +19,7 @@ instead of re-processing WAV files for minutes/hours.
 import os
 import logging
 import tempfile
-from datetime import datetime
+from datetime import datetime #pylint: disable=unused-import
 
 import numpy as np
 import pandas as pd
@@ -91,8 +91,8 @@ def save_base_matrix(
         matrix.index.name = "datetime"
     else:
         logger.warning(
-            f"No datetime for {segment.source_file}; "
-            f"saving with integer index"
+            "No datetime for %s; saving with integer index",
+            segment.source_file,
         )
 
     # Convert to PyArrow table
@@ -119,7 +119,7 @@ def save_base_matrix(
     path = os.path.join(cache_dir, fname)
     pq.write_table(table, path, compression="snappy")
 
-    logger.debug(f"Cached base matrix: {fname} ({len(matrix)} rows)")
+    logger.debug("Cached base matrix: %s (%d rows)", fname, len(matrix))
     return path
 
 
@@ -134,7 +134,7 @@ def load_base_matrix(parquet_path: str) -> pd.DataFrame:
         # Try to convert
         try:
             df.index = pd.to_datetime(df.index)
-        except Exception:
+        except Exception: #pylint: disable=broad-exception-caught
             pass
 
     return df
@@ -153,15 +153,17 @@ def load_all_cached(cache_dir: str) -> pd.DataFrame:
     if not files:
         raise FileNotFoundError(f"No .parquet files found in {cache_dir}")
 
-    logger.info(f"Loading {len(files)} cached base matrices from {cache_dir}")
+    logger.info(
+        "Loading %d cached base matrices from %s", len(files), cache_dir
+    )
 
     frames = []
     for f in files:
         try:
             df = load_base_matrix(f)
             frames.append(df)
-        except Exception as exc:
-            logger.warning(f"Could not load {f}: {exc}")
+        except Exception as exc: #pylint: disable=broad-exception-caught
+            logger.warning("Could not load %s: %s", f, exc)
 
     if not frames:
         raise FileNotFoundError("No valid Parquet files could be loaded")
@@ -170,8 +172,10 @@ def load_all_cached(cache_dir: str) -> pd.DataFrame:
     full = full[~full.index.duplicated(keep="first")]
 
     logger.info(
-        f"Merged matrix: {len(full):,} rows, "
-        f"{full.index.min()} → {full.index.max()}"
+        "Merged matrix: %s rows, %s → %s",
+        f"{len(full):,}",
+        full.index.min(),
+        full.index.max(),
     )
     return full
 
@@ -200,8 +204,8 @@ def load_cached_for_sources(
                 if not isinstance(df.index, pd.DatetimeIndex):
                     df.index = pd.to_datetime(df.index)
                 frames.append(df)
-        except Exception as exc:
-            logger.warning(f"Could not load filtered cache {f}: {exc}")
+        except Exception as exc: #pylint: disable=broad-exception-caught
+            logger.warning("Could not load filtered cache %s: %s", f, exc)
 
     if not frames:
         return pd.DataFrame()
@@ -259,4 +263,5 @@ def save_stft_npz(
 
 
 def load_stft_npz(path: str):
+    """Load STFT power from NPZ saved by save_stft_npz()."""
     return np.load(path, allow_pickle=False)

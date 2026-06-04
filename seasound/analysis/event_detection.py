@@ -1625,7 +1625,7 @@ class EventDetectionAnalysis(AnalysisModule):
             },
             warnings=warnings,
         )
-    
+
     def _generate_detector_plots(
         self,
         *,
@@ -1827,7 +1827,7 @@ class EventDetectionAnalysis(AnalysisModule):
                 plt.close(fig)
                 outputs.append(plot_path)
                 logger.info("Annotated spectrogram: %s", plot_path)
-            except Exception as exc: #pylint disable=broad-exception-caught
+            except Exception as exc: #pylint: disable=broad-exception-caught
                 msg = (
                     f"Annotated spectrogram chunk "
                     f"({window_start} → {window_end}) failed: {exc}"

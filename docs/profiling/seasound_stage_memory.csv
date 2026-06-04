@@ -1,0 +1,5 @@
+stage,rss_before_mb,peak_rss_mb,transient_delta_mb,py_traced_peak_mb,top_python_alloc_lines
+get_stft_for_file,181.7,298.3,116.6,130.5,_format_impl.py:860 (+14.3MB) | <frozen importlib._bootstrap_external>:781 (+0.1MB) | <frozen importlib._bootstrap>:488 (+0.0MB) | connection.py:365 (+0.0MB) | connection.py:116 (+0.0MB)
+read_audio,198.8,299.0,100.3,129.4,soundfile.py:1372 (+114.8MB) | reader.py:200 (+0.0MB) | tracemalloc.py:558 (+0.0MB) | popen_spawn_win32.py:76 (+0.0MB) | memory_profiler.py:369 (+0.0MB)
+apply_calibration,313.9,451.8,137.9,356.7,calibration_methods.py:87 (+113.6MB) | popen_spawn_win32.py:76 (+0.0MB) | tracemalloc.py:558 (+0.0MB) | tracemalloc.py:560 (+0.0MB) | tracemalloc.py:423 (+0.0MB)
+compute_base_matrix,427.6,1635.3,1207.6,1605.6,<frozen importlib._bootstrap_external>:781 (+0.1MB) | construction.py:274 (+0.1MB) | __init__.py:363 (+0.0MB) | version.py:149 (+0.0MB) | _compiler.py:764 (+0.0MB)

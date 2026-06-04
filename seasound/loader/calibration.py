@@ -53,26 +53,26 @@ def load_calibration(config: CalibrationConfig) -> Optional[pd.DataFrame]:
 
     if config.sensitivity_db_override is not None:
         logger.info(
-            f"Using sensitivity override: {config.sensitivity_db_override:.2f} dB "
-            f"(calibration file will not be loaded)"
+            "Using sensitivity override: %.2f dB (calibration file will not be loaded)",
+            config.sensitivity_db_override,
         )
         return None
 
     try:
         df = pd.read_excel(config.file, engine="openpyxl")
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         msg = f"Calibration file not found: {config.file}"
         if config.strict:
-            raise CalibrationError(msg)
-        logger.warning(msg + " — proceeding without calibration")
+            raise CalibrationError(msg) from exc
+        logger.warning("%s — proceeding without calibration", msg)
         return None
-    except Exception as exc:
+    except Exception as exc: #pylint: disable=broad-exception-caught
         msg = f"Could not read calibration file {config.file}: {exc}"
         if config.strict:
-            raise CalibrationError(msg)
-        logger.warning(msg + " — proceeding without calibration")
+            raise CalibrationError(msg) from exc
+        logger.warning("%s — proceeding without calibration", msg)
         return None
-    
+
     # --- Identify serial column ---
     serial_col = config.serial_column
 
@@ -104,7 +104,9 @@ def load_calibration(config: CalibrationConfig) -> Optional[pd.DataFrame]:
         return None
 
     logger.info(
-        f"Loaded calibration for {len(df)} serial(s) from {config.file}"
+        "Loaded calibration for %s serial(s) from %s",
+        len(df),
+        config.file,
     )
     return df
 
@@ -172,16 +174,16 @@ def apply_calibration(
             method = get_calibration_method(config.method)
         except ValueError as exc:
             if config.strict:
-                raise CalibrationError(str(exc))
+                raise CalibrationError(str(exc)) #pylint: disable=raise-missing-from
             logger.warning(str(exc))
             return segment.data, False
         pressure_pa = method.to_pascals(
             segment.data, config.sensitivity_db_override, config.vpp
         )
         logger.debug(
-            f"Calibration applied via override: "
-            f"method={config.method}, "
-            f"sensitivity={config.sensitivity_db_override:.1f} dB"
+            "Calibration applied via override: method=%s, sensitivity=%.1f dB",
+            config.method,
+            config.sensitivity_db_override,
         )
         return pressure_pa, True
 

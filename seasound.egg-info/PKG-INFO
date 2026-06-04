@@ -17,6 +17,9 @@ Requires-Dist: pytest>=7.0; extra == "dev"
 Requires-Dist: pytest-cov; extra == "dev"
 Provides-Extra: maad
 Requires-Dist: scikit-maad>=1.3; extra == "maad"
+Provides-Extra: profile
+Requires-Dist: psutil>=5.9; extra == "profile"
+Requires-Dist: memory_profiler>=0.61; extra == "profile"
 
 ## Installation
 

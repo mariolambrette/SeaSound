@@ -7,8 +7,8 @@ These fixtures generate synthetic test data with known properties,
 so we can verify that the pipeline produces correct results.
 """
 
-import os
-import tempfile
+import os           # pylint: disable=unused-import
+import tempfile     # pylint: disable=unused-import
 from datetime import datetime
 
 import numpy as np
@@ -106,7 +106,7 @@ def sample_calibration_file(tmp_path):
 
 
 @pytest.fixture
-def test_config(tmp_path, sample_calibration_file):
+def test_config(tmp_path, sample_calibration_file): #pylint: disable=redefined-outer-name
     """
     A PipelineConfig pointing at temporary directories.
     """
@@ -217,7 +217,7 @@ def synthetic_long_base_matrix():
     data = baselines + daily[:, None] + noise
 
     # Add deterministic burst events (for high-percentile behavior)
-    burst_starts = [6 * 3600, 30 * 3600, 54 * 3600, 78 * 3600, 102 * 3600, 126 * 3600, 150 * 3600, 174 * 3600, 198 * 3600, 222 * 3600]
+    burst_starts = [6 * 3600, 30 * 3600, 54 * 3600, 78 * 3600, 102 * 3600, 126 * 3600, 150 * 3600, 174 * 3600, 198 * 3600, 222 * 3600] #pylint: disable=line-too-long
     burst_len = 300  # 5 minutes
     for s in burst_starts:
         e = min(s + burst_len, n_seconds)
@@ -229,3 +229,178 @@ def synthetic_long_base_matrix():
     out = pd.DataFrame(data, index=index, columns=cols)
     out.index.name = "datetime"
     return out
+
+
+# ===========================================================================
+# Streaming-refactor fixtures (PR 0)
+#
+# The fixtures above all describe "polite" inputs: exact whole-second
+# durations, single files, contiguous time. The streaming refactor's
+# failure modes live in awkward inputs, so these fixtures deliberately
+# provide: durations indivisible by candidate block sizes, fractional
+# trailing seconds, multi-file seams, duty-cycle gaps, and overlapping
+# recordings.
+#
+# Audio content is seeded noise plus a tone so that every second of
+# audio is statistically distinct. A seam bug (dropped, duplicated, or
+# misaligned block) therefore changes output values; with a stationary
+# pure sine it could hide behind identical-looking frames.
+# ===========================================================================
+
+
+def _write_soundtrap_wav(directory, serial, start, duration_s, sample_rate, seed):
+    """
+    Write a deterministic SoundTrap-named WAV file and return its path.
+
+    Parameters
+    ----------
+    directory : pathlib.Path
+        Directory to write into (created if absent).
+    serial : str
+        Hydrophone serial encoded in the filename.
+    start : datetime
+        Recording start time encoded in the filename.
+    duration_s : float
+        Duration in seconds (may be fractional).
+    sample_rate : int
+        Sample rate in Hz.
+    seed : int
+        RNG seed; different per file so no two fixtures share content.
+
+    Returns
+    -------
+    str
+        Path to the written WAV file.
+    """
+    if sf is None:
+        pytest.skip("soundfile not installed")
+
+    directory.mkdir(parents=True, exist_ok=True)
+    n = int(round(duration_s * sample_rate))
+    rng = np.random.default_rng(seed)
+    t = np.arange(n) / sample_rate
+    audio = 0.3 * np.sin(2 * np.pi * 1000.0 * t) + 0.1 * rng.standard_normal(n)
+    audio = np.clip(audio, -1.0, 1.0)
+
+    name = f"{serial}.{start.strftime('%y%m%d%H%M%S')}.wav"
+    filepath = str(directory / name)
+    sf.write(filepath, audio, sample_rate)
+    return filepath
+
+
+@pytest.fixture
+def golden_config(test_config): #pylint: disable=redefined-outer-name
+    """
+    ``test_config`` with the per-file start trim disabled.
+
+    ``InputConfig.per_file_trim_start_s`` defaults to 3.0, so any fixture
+    WAV processed under ``test_config`` silently loses its first three
+    seconds and has its datetime shifted by the same amount. That default
+    is pinned explicitly in the characterisation suite; everywhere else,
+    golden identity comparisons must control it deliberately rather than
+    inherit it, so duration and seam arithmetic in tests stays literal.
+    """
+    import copy
+
+    config = copy.deepcopy(test_config)
+    config.input.per_file_trim_start_s = 0.0
+    return config
+
+
+@pytest.fixture
+def awkward_wav(tmp_path):
+    """
+    A 13-second mono WAV — deliberately indivisible by candidate
+    streaming block sizes (7, 30, 60, 300 s), so every block-boundary
+    invariance test exercises a trailing partial block.
+
+    Properties:
+    - Sample rate: 96000 Hz
+    - Duration: 13 seconds
+    - Filename: 9999.260101120000.wav (SoundTrap format)
+    - Expected datetime: 2026-01-01 12:00:00
+    """
+    return _write_soundtrap_wav(
+        tmp_path / "awkward", "9999",
+        datetime(2026, 1, 1, 12, 0, 0), 13.0, 96000, seed=101,
+    )
+
+
+@pytest.fixture
+def fractional_wav(tmp_path):
+    """
+    A 13.5-second mono WAV (96 kHz). The trailing half second does not
+    fill a 1-second bin, pinning the legacy trailing-sample drop that
+    the streamed path must reproduce at end-of-file (not end-of-block).
+    """
+    return _write_soundtrap_wav(
+        tmp_path / "fractional", "9999",
+        datetime(2026, 1, 1, 12, 0, 0), 13.5, 96000, seed=102,
+    )
+
+
+@pytest.fixture
+def contiguous_wav_pair(tmp_path):
+    """
+    Two back-to-back recordings: 13 s starting 12:00:00 and 10 s starting
+    12:00:13. Exercises the per-file STFT carry-buffer reset — the union
+    of per-file frame sets must appear, never a fabricated cross-file frame.
+
+    Returns
+    -------
+    tuple[str, list[str]]
+        (directory, [first_path, second_path]) in chronological order.
+    """
+    directory = tmp_path / "contiguous"
+    first = _write_soundtrap_wav(
+        directory, "9999", datetime(2026, 1, 1, 12, 0, 0), 13.0, 96000, seed=201,
+    )
+    second = _write_soundtrap_wav(
+        directory, "9999", datetime(2026, 1, 1, 12, 0, 13), 10.0, 96000, seed=202,
+    )
+    return str(directory), [first, second]
+
+
+@pytest.fixture
+def gapped_wav_pair(tmp_path):
+    """
+    Two duty-cycled recordings with a 47-second gap: 13 s starting
+    12:00:00, then 10 s starting 12:01:00. Both products must index
+    correctly across the gap with no off-by-one.
+
+    Returns
+    -------
+    tuple[str, list[str]]
+        (directory, [first_path, second_path]) in chronological order.
+    """
+    directory = tmp_path / "gapped"
+    first = _write_soundtrap_wav(
+        directory, "9999", datetime(2026, 1, 1, 12, 0, 0), 13.0, 96000, seed=301,
+    )
+    second = _write_soundtrap_wav(
+        directory, "9999", datetime(2026, 1, 1, 12, 1, 0), 10.0, 96000, seed=302,
+    )
+    return str(directory), [first, second]
+
+
+@pytest.fixture
+def overlapping_wav_pair(tmp_path):
+    """
+    Two recordings overlapping by 5 seconds: 13 s starting 12:00:00 and
+    10 s starting 12:00:08. The overlap window [12:00:08, 12:00:13) has
+    different audio content in each file, so keep-first deduplication is
+    observable in values, not just row counts.
+
+    Returns
+    -------
+    tuple[str, list[str]]
+        (directory, [first_path, second_path]) in chronological order.
+    """
+    directory = tmp_path / "overlapping"
+    first = _write_soundtrap_wav(
+        directory, "9999", datetime(2026, 1, 1, 12, 0, 0), 13.0, 96000, seed=401,
+    )
+    second = _write_soundtrap_wav(
+        directory, "9999", datetime(2026, 1, 1, 12, 0, 8), 10.0, 96000, seed=402,
+    )
+    return str(directory), [first, second]

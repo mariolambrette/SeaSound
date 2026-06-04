@@ -59,7 +59,7 @@ class CalibrationMethod(ABC):
         np.ndarray
             Audio data in Pascals.
         """
-        ...
+
 
 
 class SoundTrapMethod(CalibrationMethod):
