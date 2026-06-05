@@ -22,3 +22,7 @@ class CalibrationError(SeaSoundError):
 
 class ReaderError(SeaSoundError):
     """Raised when an audio file cannot be read or parsed."""
+
+
+class StftStoreError(SeaSoundError):
+    """Raised when an STFT shard or the shard manifest is invalid."""

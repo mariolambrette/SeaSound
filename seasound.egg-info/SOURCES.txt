@@ -33,6 +33,7 @@ seasound/loader/loaded_artifacts.py
 seasound/loader/metadata_readers.py
 seasound/loader/reader.py
 seasound/loader/stft.py
+seasound/loader/stft_store.py
 seasound/plotting/__init__.py
 seasound/plotting/_common.py
 seasound/plotting/_style.py
@@ -57,7 +58,10 @@ tests/test_plotting_event_detection.py
 tests/test_plotting_ltsa.py
 tests/test_reader.py
 tests/test_reader_trim.py
+tests/test_resolve_calibration.py
 tests/test_spectral.py
 tests/test_spectral_percentiles.py
 tests/test_stft.py
+tests/test_stft_store.py
+tests/test_streaming_base_matrix.py
 tests/tests_plotting_common.py

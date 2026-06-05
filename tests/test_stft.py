@@ -1,7 +1,7 @@
 """Tests for STFT computation module."""
 
 import numpy as np
-import pytest
+import pytest #pylint: disable=unused-import
 from seasound.loader.stft import compute_stft_power
 
 
@@ -28,8 +28,8 @@ class TestComputeSTFTPower:
 
         # Expected time frames: (n_samples - win_length) / hop_length + 1
         # But with boundary=None and padded=False, scipy reduces this
-        expected_frames = (len(audio) - 2048) // 1024 + 1
-        
+        expected_frames = (len(audio) - 2048) // 1024 + 1 #pylint: disable=unused-variable
+
         assert power.ndim == 2
         assert power.shape[0] == len(freqs)
         assert power.shape[1] == len(times)
@@ -43,7 +43,7 @@ class TestComputeSTFTPower:
         audio = audio.astype(np.float32)
 
         fmin, fmax = 100.0, 10000.0
-        freqs, times, power = compute_stft_power(
+        freqs, _, _ = compute_stft_power(
             audio,
             sample_rate=sr,
             nfft=2048,
@@ -65,7 +65,7 @@ class TestComputeSTFTPower:
         audio = np.sin(2 * np.pi * 1000 * np.arange(sr * duration) / sr)
         audio = audio.astype(np.float32)
 
-        freqs, times, power = compute_stft_power(
+        _, _, power = compute_stft_power(
             audio,
             sample_rate=sr,
             nfft=2048,
@@ -86,7 +86,7 @@ class TestComputeSTFTPower:
         audio = np.sin(2 * np.pi * freq_signal * np.arange(sr * duration) / sr)
         audio = audio.astype(np.float32) * 0.5
 
-        freqs, times, power = compute_stft_power(
+        freqs, _, power = compute_stft_power(
             audio,
             sample_rate=sr,
             nfft=2048,
@@ -113,7 +113,7 @@ class TestComputeSTFTPower:
         audio = audio.astype(np.float32)
 
         for window_type in ["hann", "hamming", "blackman"]:
-            freqs, times, power = compute_stft_power(
+            _, _, power = compute_stft_power(
                 audio,
                 sample_rate=sr,
                 nfft=2048,
@@ -133,7 +133,7 @@ class TestComputeSTFTPower:
         audio = np.sin(2 * np.pi * 1000 * np.arange(sr * duration) / sr)
         audio = audio.astype(np.float32)
 
-        freqs, times, power = compute_stft_power(
+        _, _, power = compute_stft_power(
             audio,
             sample_rate=sr,
             nfft=2048,
