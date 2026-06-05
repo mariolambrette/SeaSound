@@ -24,9 +24,15 @@ import seasound
 from seasound.core.config import PipelineConfig, load_config
 from seasound.core.logging import setup_logging
 from seasound.core.exceptions import SeaSoundError
-from seasound.loader.reader import read_audio
+from seasound.loader.reader import (
+    AudioBlockReader,
+    AudioSegment,
+    extract_channel_block,
+    probe_output_channels,
+    read_audio,
+)
 from seasound.loader.calibration import load_calibration, resolve_calibration
-from seasound.loader.base_matrix import compute_base_matrix
+from seasound.loader.base_matrix import BaseMatrixAccumulator, compute_base_matrix
 from seasound.loader.cache import ( #pylint: disable=unused-import
     is_cached,
     save_base_matrix,
@@ -197,15 +203,27 @@ def _process_one_file(
 
     Cache writes are optional side effects.
     Returns in-memory artifacts regardless of cache mode.
+
+    With pipeline.streaming_enabled the file is streamed in whole-bin
+    blocks (bit-identical output, per-worker memory bounded by one
+    block); otherwise the legacy full-read path runs. The legacy path
+    and this flag are removed together at refactor Stage 6.
     """
     # Optional STFT cache generation during Stage 1.
     # This ensures load-only runs can precompute STFT products.
+    # (Still the legacy full-file computation — replaced by the
+    # streaming StftAccumulator at refactor Stage 3.)
     if config.pipeline.stft_cache_enabled:
         try:
             get_stft_for_file(wav_path, config, cache_dir)
         except Exception as exc:
             logger.error("STFT caching failed for %s: %s", wav_path, exc)
             raise
+
+    if config.pipeline.streaming_enabled: #type: ignore
+        return _process_one_file_streaming(
+            wav_path, config, cal_df, cache_dir, parser
+        )
 
     segments = read_audio(wav_path, config.input, parser=parser)
     artifacts: list[SegmentArtifact] = []
@@ -253,6 +271,93 @@ def _process_one_file(
     return artifacts
 
 
+def _process_one_file_streaming(
+    wav_path: str,
+    config: PipelineConfig,
+    cal_df: Optional[pd.DataFrame],
+    cache_dir: str,
+    parser: Optional[FilenameParser] = None,
+) -> list[SegmentArtifact]:
+    """
+    Streaming per-file processing (refactor plan Stage 2, base matrix
+    only): one pass over the file in whole-bin blocks; per output
+    channel, in-place block calibration feeds a BaseMatrixAccumulator.
+    Per-worker memory holds one block plus the per-channel output
+    arrays — independent of file duration.
+    """
+    with AudioBlockReader(
+        wav_path,
+        config.input,
+        parser=parser,
+        bin_seconds=config.pipeline.base_resolution_s,
+    ) as reader:
+        # Per-file calibration state, resolved before any samples are
+        # read (the reader duck-types via .serial / .source_file).
+        resolved = resolve_calibration(reader, cal_df, config.calibration) #type: ignore
+
+        # One accumulator per output channel, single pass (plan Stage 2;
+        # under 'auto' the per-worker peak scales with channel count,
+        # never with file length).
+        accumulators: dict[int, BaseMatrixAccumulator] = {}
+        for ch in reader.channels:
+            acc = BaseMatrixAccumulator(
+                reader.sample_rate, reader.n_bins, config.pipeline
+            )
+            acc.set_anchor(reader.datetime_start)
+            accumulators[ch] = acc
+
+        for raw_block, t0 in reader.blocks(
+            config.pipeline.streaming_block_seconds #type: ignore
+        ):
+            for ch in reader.channels:
+                # View or per-sample mean of THIS block only; in-place
+                # calibration mutates the raw block's storage, which is
+                # discarded at the end of the iteration. Under 'auto'
+                # the channels are disjoint columns, so per-channel
+                # in-place calibration cannot interact.
+                channel_block = extract_channel_block(
+                    raw_block, config.input.channel_strategy, ch
+                )
+                block_pa = resolved.apply_inplace(channel_block)
+                accumulators[ch].push(block_pa, t0)
+
+        artifacts: list[SegmentArtifact] = []
+        for ch in reader.channels:
+            matrix = accumulators[ch].finalise(reader.datetime_start)
+
+            cache_paths: list[str] = []
+            if config.pipeline.cache_base_matrix:
+                # save_base_matrix consumes segment *metadata* only; the
+                # streaming path has no sample array, so it passes an
+                # empty placeholder.
+                meta_segment = AudioSegment(
+                    data=np.empty(0, dtype=np.float32),
+                    sample_rate=reader.sample_rate,
+                    serial=reader.serial,
+                    datetime_start=reader.datetime_start,
+                    channel=ch,
+                    source_file=wav_path,
+                )
+                path = save_base_matrix(
+                    matrix, meta_segment, resolved.calibrated, cache_dir
+                )
+                cache_paths.append(path)
+
+            artifacts.append(
+                SegmentArtifact(
+                    source_file=wav_path,
+                    channel=ch,
+                    serial=reader.serial,
+                    datetime_start=reader.datetime_start,
+                    calibrated=resolved.calibrated,
+                    base_matrix=matrix,
+                    cache_paths=cache_paths,
+                )
+            )
+
+    return artifacts
+
+
 def _worker_fn(args):
     """Wrapper for multiprocessing (can't pickle lambdas)."""
     wav_path, config, cal_df, cache_dir = args
@@ -262,7 +367,7 @@ def _worker_fn(args):
     try:
         artifacts = _process_one_file(wav_path, config, cal_df, cache_dir, parser)
         return True, time_module.time() - t0, artifacts
-    except Exception as exc: #pylint: disable=broad-except
+    except Exception as exc: #pylint: disable=broad-exception-caught
         logger.error("Error processing %s: %s", wav_path, exc)
         return False, time_module.time() - t0, []
 
@@ -380,7 +485,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
                         remaining = (total - completed) * avg
                         eta = timedelta(seconds=int(remaining))
                         logger.info(
-                            "Progress: %s/%s (%s OK) ETA: %s",
+                            "Progress: %d/%d (%d OK) ETA: %s",
                             completed,
                             total,
                             successes,
@@ -388,9 +493,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
                         )
 
         logger.info(
-            "Loading complete: %s/%s files processed",
-            successes,
-            total,
+            "Loading complete: %d/%d files processed", successes, total
         )
 
     # Load all cached matrices (including previously cached ones)
@@ -414,24 +517,27 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
             (full_matrix.index >= clip_start) & (full_matrix.index <= clip_end)
         ]
         logger.info(
-            "Deployment clipping: %s → %s rows",
-            f"{before:,}",
-            f"{len(full_matrix):,}",
+            "Deployment clipping: %d → %d rows",
+            before,
+            len(full_matrix)
         )
 
     return full_matrix
 
 
 def _expected_channels_for_file(
-    wav_path: str,
+    wav_path: str, 
     config: PipelineConfig,
 ) -> list[int]:
     """
     Return output channel IDs expected for this file under current strategy.
+
+    Header-only probe: previously this called read_audio, which decoded
+    the entire file in the coordinator just to count channels — once
+    per file, per resumed run. probe_output_channels resolves the same
+    channel set from the file header (equivalence is gated by a test).
     """
-    parser = get_parser(config.input)
-    segments = read_audio(wav_path, config.input, parser=parser)
-    return [seg.channel for seg in segments]
+    return probe_output_channels(wav_path, config.input)
 
 
 def _is_fully_cached(
@@ -523,9 +629,9 @@ def run_analyses(base_matrix: pd.DataFrame, config: PipelineConfig) -> dict:
             if required:
                 logger.error("Required analysis '%s' failed: %s", name, e)
                 raise
-
-            logger.warning("Optional analysis '%s' failed (continuing): %s", name, e)
-            continue
+            else:
+                logger.warning("Optional analysis '%s' failed (continuing): %s", name, e)
+                continue
 
     if not results:
         logger.info("No enabled analyses found in config")
@@ -668,9 +774,10 @@ def run_plot_mode(
             plot_cfg = (an.get("config", {}) or {}).get("plot", {}) or {}
         except Exception as exc: #pylint: disable=broad-exception-caught
             logger.warning(
-                "Could not load plot config from %s: %s; using defaults.",
+                "Could not load plot config from %s: %s; "
+                "using defaults.",
                 config_path,
-                exc,
+                exc
             )
 
     # --- Build plotter and figure ---
@@ -823,7 +930,7 @@ def cli_main():
     try:
         config = load_config(args.config, overrides)
     except SeaSoundError as exc:
-        print(f"\nConfiguration error:\n{exc}")
+        logger.error("\nConfiguration error:\n%s", exc)
         raise SystemExit(1) from exc
 
     # Apply runtime flags
@@ -852,6 +959,6 @@ def cli_main():
     except SeaSoundError as exc:
         logger.error("\nPipeline error: %s", exc)
         raise SystemExit(1) from exc
-    except KeyboardInterrupt as exc:
+    except KeyboardInterrupt:
         logger.warning("\nInterrupted by user")
-        raise SystemExit(130) from exc
+        raise SystemExit(130) #pylint: disable=raise-missing-from

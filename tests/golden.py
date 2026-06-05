@@ -132,6 +132,38 @@ def legacy_stft_entries(
     return get_stft_for_file(wav_path, cfg, cache_dir="")
 
 
+def streamed_base_matrix_artifacts(
+    wav_path: str,
+    config: PipelineConfig,
+) -> list[dict[str, Any]]:
+    """
+    Candidate function for the Stage 2 gates: run the real streaming
+    pipeline path (_process_one_file_streaming) on one file with cache
+    writes disabled, returning artifacts in the same dict shape as
+    legacy_base_matrix_artifacts.
+    """
+    # Imported lazily so golden.py stays importable without the
+    # pipeline's orchestration dependencies.
+    from seasound.core.pipeline import _process_one_file_streaming
+
+    cfg = copy.deepcopy(config)
+    cfg.pipeline.streaming_enabled = True
+    cfg.pipeline.cache_base_matrix = False
+    cal_df = load_calibration(cfg.calibration)
+
+    artifacts = _process_one_file_streaming(wav_path, cfg, cal_df, cache_dir="")
+    return [
+        {
+            "channel": a.channel,
+            "serial": a.serial,
+            "datetime_start": a.datetime_start,
+            "calibrated": a.calibrated,
+            "base_matrix": a.base_matrix,
+        }
+        for a in artifacts
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Assertion helpers
 # ---------------------------------------------------------------------------

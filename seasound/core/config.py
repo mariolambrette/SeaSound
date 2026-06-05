@@ -130,6 +130,13 @@ class ProcessingConfig:
     cache_base_matrix: bool = True
     cache_directory: Optional[str] = None
 
+    # Streaming Stage-1 path (refactor plan Stage 2). Transitional
+    # dual-path flag: False keeps the legacy full-read path; True
+    # streams whole-bin blocks (bit-identical output, bounded memory).
+    # The flag and the legacy path are removed together at Stage 6.
+    streaming_enabled: bool = False
+    streaming_block_seconds: int = 60
+
     # Optional linear STFT support
     stft_cache_enabled: bool = False
     stft_nfft: int = 2048
@@ -347,6 +354,19 @@ def validate(raw: dict) -> PipelineConfig:
         errors.append(
             f"pipeline.sxx_dtype must be one of: "
             f"{', '.join(sorted(valid_sxx_dtypes))}"
+        )
+
+    bs = config.pipeline.streaming_block_seconds
+    res = config.pipeline.base_resolution_s
+    if not isinstance(bs, int) or bs < 1:
+        errors.append(
+            f"pipeline.streaming_block_seconds must be a positive integer; "
+            f"got {bs}"
+        )
+    elif isinstance(res, int) and res >= 1 and bs % res != 0:
+        errors.append(
+            f"pipeline.streaming_block_seconds ({bs}) must be a whole "
+            f"multiple of pipeline.base_resolution_s ({res})"
         )
 
     # --- Deployment validation ---
