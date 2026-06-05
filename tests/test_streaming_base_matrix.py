@@ -178,7 +178,7 @@ class TestGapsAndMultiFile:
             cfg.pipeline.resume = False
             cfg.pipeline.workers = 1
             cfg.output.directory = str(
-                pd.io.common.os.path.join(directory, f"out_{streaming}")
+                pd.io.common.os.path.join(directory, f"out_{streaming}") #type: ignore
             )
             results[streaming] = run_loading(cfg)
 
@@ -287,7 +287,10 @@ class TestConfigValidation:
     def test_default_block_seconds_valid(self):
         cfg = validate(self._raw(60))
         assert cfg.pipeline.streaming_block_seconds == 60
-        assert cfg.pipeline.streaming_enabled is False  # transitional default
+        # Streaming is the default since the Stage 2 gates passed;
+        # False remains available as the legacy escape hatch until
+        # Stage 6 removes both.
+        assert cfg.pipeline.streaming_enabled is True
 
     def test_indivisible_block_seconds_rejected(self):
         with pytest.raises(ConfigError):

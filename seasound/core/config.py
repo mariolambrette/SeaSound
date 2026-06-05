@@ -134,7 +134,7 @@ class ProcessingConfig:
     # dual-path flag: False keeps the legacy full-read path; True
     # streams whole-bin blocks (bit-identical output, bounded memory).
     # The flag and the legacy path are removed together at Stage 6.
-    streaming_enabled: bool = False
+    streaming_enabled: bool = True
     streaming_block_seconds: int = 60
 
     # Optional linear STFT support
