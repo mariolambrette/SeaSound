@@ -30,6 +30,9 @@ class SpectrogramAnalysis(AnalysisModule):
 
     name = "spectrogram"
 
+    # STFT-derived data, plus the base matrix for overlays (refactor §7).
+    REQUIRES = frozenset({"stft", "base_matrix"})
+
     def validate_config(self, cfg: dict) -> None:
         errors = []
 

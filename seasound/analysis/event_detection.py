@@ -39,6 +39,12 @@ class EventDetector(ABC):
 
     name: str
 
+    # Detectors run on the base matrix (refactor §7/D5). ``detect``
+    # accepts an optional ``stft`` accessor for forward compatibility —
+    # a future detector may consume the STFT — but no current detector
+    # does. A subclass that needs it adds "stft" here.
+    REQUIRES: frozenset = frozenset({"base_matrix"})
+
     @abstractmethod
     def validate_config(self, cfg: dict, shared_cfg: dict) -> None:
         """Validate the detector-specific configuration."""
@@ -49,8 +55,14 @@ class EventDetector(ABC):
         base_matrix: pd.DataFrame,
         cfg: dict,
         shared_cfg: dict,
+        stft=None,
     ) -> pd.DataFrame:
-        """Run detection on the base matrix."""
+        """Run detection on the base matrix.
+
+        ``stft`` is an optional windowed STFT accessor for detectors
+        that declare ``"stft"`` in ``REQUIRES``; it is ``None`` for the
+        base-matrix detectors that ship today.
+        """
 
 
 DETECTOR_REGISTRY: dict[str, Type[EventDetector]] = {}
@@ -423,6 +435,7 @@ class BandThresholdDetector(EventDetector):
         base_matrix: pd.DataFrame,
         cfg: dict,
         shared_cfg: dict,
+        stft=None,
     ) -> pd.DataFrame:
         """Run detection. Returns events only."""
         events_df, _ = self._run(
@@ -714,6 +727,7 @@ class AdaptiveThresholdLegacyDetector(EventDetector):
         base_matrix: pd.DataFrame,
         cfg: dict,
         shared_cfg: dict,
+        stft=None,
     ) -> pd.DataFrame:
         freq_range = cfg.get(
             "broadband_freq_range",
@@ -903,6 +917,7 @@ class PCAAnomalyDetector(EventDetector):
         base_matrix: pd.DataFrame,
         cfg: dict,
         shared_cfg: dict,
+        stft=None,
     ) -> pd.DataFrame:
         top_n = int(cfg.get(
             "report_top_n_bands", self.DEFAULTS["report_top_n_bands"]
@@ -1055,6 +1070,19 @@ class EventDetectionAnalysis(AnalysisModule):
     """Analysis-module wrapper that runs one or more event detectors."""
 
     name = "event_detection"
+
+    # Detectors run on the base matrix; the annotated-spectrogram
+    # sub-feature additionally needs the STFT, but only when it is
+    # enabled — so the requirement is computed from config (refactor §7)
+    # rather than declared as a static set.
+    REQUIRES = frozenset({"base_matrix"})
+
+    def required_substrates(self, module_cfg: dict | None = None) -> set[str]:
+        substrates = set(self.REQUIRES)
+        annotated = (module_cfg or {}).get("annotated_spectrogram") or {}
+        if annotated.get("enabled", False):
+            substrates.add("stft")
+        return substrates
 
     def validate_config(self, cfg: dict) -> None:
         errors: list[str] = []

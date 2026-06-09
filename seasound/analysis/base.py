@@ -25,14 +25,17 @@ class AnalysisModule(ABC):
 
     name: str
 
+    # Substrates this analysis needs the loader to produce (refactor §7).
+    # The default covers every base-matrix analysis (ltsa, tob_levels,
+    # spectral_percentiles, the detectors); modules that read the STFT
+    # override it (see SpectrogramAnalysis), and modules whose need is
+    # conditional on config override ``required_substrates`` instead
+    # (see EventDetectionAnalysis).
+    REQUIRES: frozenset = frozenset({"base_matrix"})
+
     @abstractmethod
     def validate_config(self, cfg: dict) -> None:
-        """
-        Validate configuration dict for this module.
-
-        Raise ValueError if config is invalid.
-        Called before run() to fail fast on bad parameters.
-        """
+        """Validate configuration dict for this module."""
 
     @abstractmethod
     def run(
@@ -41,30 +44,16 @@ class AnalysisModule(ABC):
         cfg: dict,
         output_dir: str,
     ) -> AnalysisResult:
+        """Execute the analysis on a base matrix."""
+
+    def required_substrates(self, module_cfg: dict | None = None) -> set[str]:
+        """Substrates this analysis needs produced for the given config.
+
+        Defaults to ``REQUIRES``. Override when the requirement is
+        conditional on the module's own config (e.g. event detection
+        only needs the STFT when its annotated spectrogram is enabled).
         """
-        Execute the analysis on a base matrix.
-
-        Parameters
-        ----------
-        base_matrix: pd.DataFrame
-            TOB-resolution base matrix (DateTimeIndex, frequency columns)
-        cfg: dict
-            Module-specific configuration paramters (pre-validated by 
-            validate_config)
-        output_dir: str
-            Directory where outputs should be written.
-
-        Returns
-        -------
-        AnalysisResult
-            Result container with outputs, summary, and warnings.
-
-        Raises
-        ------
-        AnalysisModuleError
-            If the module encounters an unrecoverable error during processing
-            (invalid data, missing columns, etc.).
-        """
+        return set(self.REQUIRES)
 
     # --- Helper methods for common operations ---
 
@@ -92,9 +81,7 @@ class AnalysisModule(ABC):
         ]
 
     def _get_frequency_value(self, column_name: str) -> float:
-        """
-        Extract numeric frequency from column name (e.g., '1000.0Hz' → 1000.0).
-        """
+        """Extract numeric frequency from column name."""
         if not column_name.endswith("Hz"):
             raise ValueError(f"Invalid frequency column name: {column_name}")
         return float(column_name[:-2])
@@ -104,21 +91,7 @@ class AnalysisModule(ABC):
         base_matrix: pd.DataFrame,
         freq_range: tuple[float, float] | None,
     ) -> pd.DataFrame:
-        """
-        Filter base_matrix to only include frequencies in [freq_min, freq_max].
-
-        Parameters
-        ----------
-        base_matrix: pd.DataFrame
-            TOB matrix
-        freq_range: tuple[float, float] or None
-            (freq_min, freq_max) in Hz. If None, no filtering is applied.
-
-        Returns
-        -------
-        pd.DataFrame
-            Filtered base matrix with only frequency columns in range.
-        """
+        """Filter base_matrix to only include frequencies in range."""
         if freq_range is None:
             return base_matrix.copy()
 
@@ -145,11 +118,7 @@ class AnalysisModule(ABC):
         self,
         context: dict,
     ) -> None:
-        """
-        Attach runtime context provided by the pipeline.
-
-        This is optional and modules can ignore it.
-        """
+        """Attach runtime context provided by the pipeline."""
         self._runtime_context = dict(context) # pylint: disable=attribute-defined-outside-init
 
     def _get_runtime_context(self) -> dict:

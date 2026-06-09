@@ -153,6 +153,16 @@ class ProcessingConfig:
     # cheaper. The default suits hour-scale consumer windows.
     stft_time_chunk_frames: int = 8192
 
+    # Substrate producer overrides (refactor §7). None = the resolver
+    # (core/substrates.py) decides from the enabled analyses' needs;
+    # True = force the producer on even when no analysis needs it;
+    # False = force it off, in which case an enabled analysis that
+    # needs it is skipped with a warning (warn-and-skip). These are the
+    # resolver's force levers; Stage 5b wires them into the loop and
+    # supersedes the legacy stft_cache_enabled / cache_base_matrix gates.
+    base_matrix_enabled: Optional[bool] = None
+    stft_enabled: Optional[bool] = None
+
 
 @dataclass
 class PipelineConfig:
@@ -377,6 +387,14 @@ def validate(raw: dict) -> PipelineConfig:
             f"pipeline.streaming_block_seconds ({bs}) must be a whole "
             f"multiple of pipeline.base_resolution_s ({res})"
         )
+
+    for _override in ("base_matrix_enabled", "stft_enabled"):
+        _val = getattr(config.pipeline, _override)
+        if _val is not None and not isinstance(_val, bool):
+            errors.append(
+                f"pipeline.{_override} must be true, false, or null; "
+                f"got {_val!r}"
+            )
 
     # --- Deployment validation ---
     if config.deployment.enabled:

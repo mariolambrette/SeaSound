@@ -23,6 +23,7 @@ seasound/core/logging.py
 seasound/core/output_layout.py
 seasound/core/pipeline.py
 seasound/core/stft.py
+seasound/core/substrates.py
 seasound/loader/__init__.py
 seasound/loader/base_matrix.py
 seasound/loader/cache.py
@@ -66,4 +67,5 @@ tests/test_stft_store.py
 tests/test_streaming_base_matrix.py
 tests/test_streaming_stft.py
 tests/test_streaming_stft_render.py
+tests/test_substrates.py
 tests/tests_plotting_common.py
