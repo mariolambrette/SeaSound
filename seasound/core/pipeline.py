@@ -21,9 +21,10 @@ import numpy as np #pylint: disable=unused-import
 import pandas as pd
 
 import seasound
+import seasound.analysis # noqa: F401  (registers built-in analyses)
 from seasound.core.config import PipelineConfig, load_config
 from seasound.core.logging import setup_logging
-from seasound.core.exceptions import SeaSoundError
+from seasound.core.exceptions import SeaSoundError, ConfigError #pylint: disable=unused-import
 from seasound.loader.reader import (
     AudioBlockReader,
     AudioSegment,
@@ -57,6 +58,8 @@ from seasound.core.substrates import (
     resolve_producers,
     subtract_cached,
     validate_substrates,
+    validate_analyses_registered,
+    validate_resolved_coverage,
 )
 
 
@@ -553,14 +556,33 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         )
     logger.info(f"Found {len(wav_files)} audio file(s)")
 
-    # Resolve which products this run must produce (refactor §7), and
-    # surface warn-and-skip warnings for any enabled analysis whose
-    # required substrate has been force-disabled.
+    # Preflight (hard error): every enabled analysis must resolve to a
+    # registered, instantiable module, else it would contribute no substrate
+    # needs silently — the registry import-order failure mode.
+    reg_errors = validate_analyses_registered(config)
+    if reg_errors:
+        raise ConfigError(
+            "Analysis configuration errors:\n"
+            + "\n".join(f"  • {e}" for e in reg_errors)
+        )
+
     resolved = resolve_producers(config)
+
+    # Hard error: a needed substrate missing from the resolved set for any
+    # reason other than being force-disabled is a resolver/registration bug.
+    cov_errors = validate_resolved_coverage(config, resolved)
+    if cov_errors:
+        raise ConfigError(
+            "Substrate resolution errors:\n"
+            + "\n".join(f"  • {e}" for e in cov_errors)
+        )
+
+    # Warn-and-skip (user choice): an enabled analysis whose required
+    # substrate was force-disabled degrades gracefully.
     for warning in validate_substrates(config):
         logger.warning(warning)
     logger.info("Resolved producers: %s", ", ".join(sorted(resolved)) or "(none)")
-
+    
     # Filter already-cached files if resume=True
     if config.pipeline.resume:
         files_to_process = [

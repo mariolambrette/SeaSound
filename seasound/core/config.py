@@ -13,14 +13,24 @@ Configuration validation occurs in three stages:
 
 Validation errors raise ConfigError with a human-readable message
 listing all problems (not just the first one found).
+
+In addition to the error-raising validate(), check_config_keys() emits
+non-fatal warnings for unknown, removed, or inert config keys. Unknown keys
+are otherwise silently dropped by _build_dataclass; surfacing them catches
+typos and warns about keys that have lost their effect under the streaming
+path before they are removed.
 """
 
 import os
+import logging
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional
 import yaml
 
 from seasound.core.exceptions import ConfigError
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Dataclass definitions — one per config section
@@ -237,13 +247,100 @@ def merge_cli(base: dict, overrides: dict) -> dict:
     return base
 
 
+# ---------------------------------------------------------------------------
+# Config-key hygiene (warn on unknown / removed / inert keys)
+# ---------------------------------------------------------------------------
+
+# Keys that once existed (or were proposed) but are no longer read. Mapped to
+# a tailored message so the user gets guidance rather than a bare "unknown".
+_REMOVED_KEYS = {
+    "pipeline.chunk_duration_s": (
+        "is no longer used: under the streaming path each block is the chunk "
+        "(see pipeline.streaming_block_seconds)."
+    ),
+}
+
+# Keys still read by the legacy full-read path but inert once streaming is
+# enabled (the default). Warned only when streaming is on, since they remain
+# meaningful with streaming_enabled: false. streaming_enabled itself joins
+# this set when the legacy path is removed (refactor Stage 6).
+_INERT_UNDER_STREAMING = ("stft_cache_enabled", "cache_base_matrix")
+
+
+def _schema_keys(cls, prefix: str = ""):
+    """Return (all_valid_dotted_keys, dataclass_section_dotted_keys) for cls.
+
+    Recurses into nested dataclass fields only. dict-typed fields (e.g.
+    analyses, deployment.metadata_columns) are leaves: their contents are
+    user-defined and must not be flagged as unknown.
+    """
+    all_keys: set = set()
+    sections: set = set()
+    for f in dataclasses.fields(cls):
+        dotted = f"{prefix}{f.name}"
+        all_keys.add(dotted)
+        if dataclasses.is_dataclass(f.type):
+            sections.add(dotted)
+            sub_all, sub_sections = _schema_keys(f.type, prefix=f"{dotted}.")
+            all_keys |= sub_all
+            sections |= sub_sections
+    return all_keys, sections
+
+
+def _iter_present_keys(raw: dict, sections: set, prefix: str = ""):
+    """Yield the dotted keys actually present in raw, descending only into
+    known dataclass sections so dict-leaf contents are not walked."""
+    if not isinstance(raw, dict):
+        return
+    for key, value in raw.items():
+        dotted = f"{prefix}{key}"
+        yield dotted
+        if isinstance(value, dict) and dotted in sections:
+            yield from _iter_present_keys(value, sections, prefix=f"{dotted}.")
+
+
+def check_config_keys(raw: dict) -> list[str]:
+    """Human-readable warnings for unknown, removed, or inert config keys.
+
+    Pure: logs nothing and raises nothing (mirrors substrates.validate_*),
+    so the caller controls logging and it stays unit-testable. Unknown keys
+    are silently dropped by _build_dataclass; this surfaces them before they
+    cause confusion, and warns about keys that are inert under the streaming
+    path before Stage 6 removes them.
+    """
+    valid, sections = _schema_keys(PipelineConfig)
+    present = set(_iter_present_keys(raw, sections))
+    warnings: list[str] = []
+
+    # Unknown / removed keys.
+    for dotted in sorted(present - valid):
+        if dotted in _REMOVED_KEYS:
+            warnings.append(f"Config key '{dotted}' {_REMOVED_KEYS[dotted]}")
+        else:
+            warnings.append(
+                f"Unknown config key '{dotted}' — ignored. Check for a typo."
+            )
+
+    # Inert-under-streaming keys (only when streaming is actually on).
+    pipe = raw.get("pipeline", {}) or {}
+    streaming_on = pipe.get("streaming_enabled", True)
+    if streaming_on:
+        for name in _INERT_UNDER_STREAMING:
+            if name in pipe:
+                warnings.append(
+                    f"Config key 'pipeline.{name}' has no effect while "
+                    f"streaming is enabled (the default) and will be removed "
+                    f"in a future release."
+                )
+
+    return warnings
+
+
 def _build_dataclass(cls, data: dict):
     """
     Recursively build a dataclass from a dict, ignoring unknown keys.
     Handles nested dataclasses by inspecting field types.
     """
-    import dataclasses
-
     if not isinstance(data, dict):
         return data
 
@@ -466,4 +563,6 @@ def load_config(
     """
     raw = load_yaml(config_path)
     raw = merge_cli(raw, cli_overrides or {})
+    for warning in check_config_keys(raw):
+        logger.warning(warning)
     return validate(raw)

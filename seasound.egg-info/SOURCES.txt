@@ -51,8 +51,10 @@ tests/test_build_stft_matrix.py
 tests/test_calculate_stft.py
 tests/test_calibration.py
 tests/test_characterisation_legacy.py
+tests/test_configs.py
 tests/test_event_detection.py
 tests/test_event_detection_plot_integration.py
+tests/test_golden_baseline.py
 tests/test_integration_pipeline.py
 tests/test_output_layout.py
 tests/test_plotting_event_detection.py
@@ -66,6 +68,7 @@ tests/test_spectral_percentiles.py
 tests/test_stft.py
 tests/test_stft_store.py
 tests/test_streaming_base_matrix.py
+tests/test_streaming_invariance.py
 tests/test_streaming_stft.py
 tests/test_streaming_stft_render.py
 tests/test_substrates.py
