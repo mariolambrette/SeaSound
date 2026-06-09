@@ -49,6 +49,16 @@ def is_cached(wav_path: str, channel: int, cache_dir: str) -> bool:
     return os.path.isfile(os.path.join(cache_dir, fname))
 
 
+def base_matrix_cache_path(wav_path: str, channel: int, cache_dir: str) -> str:
+    """Path to the cached base-matrix Parquet for a WAV file + channel.
+
+    Exposes the cache naming so callers can load a previously cached
+    base matrix without re-deriving the filename (used when a file is
+    reprocessed for STFT only and its base matrix is read from cache).
+    """
+    return os.path.join(cache_dir, _cache_filename(wav_path, channel))
+
+
 def save_base_matrix(
     matrix: pd.DataFrame,
     segment: AudioSegment,

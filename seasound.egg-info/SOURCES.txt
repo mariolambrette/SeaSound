@@ -60,6 +60,7 @@ tests/test_plotting_ltsa.py
 tests/test_reader.py
 tests/test_reader_trim.py
 tests/test_resolve_calibration.py
+tests/test_resume.py
 tests/test_spectral.py
 tests/test_spectral_percentiles.py
 tests/test_stft.py

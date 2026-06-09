@@ -160,7 +160,10 @@ class ProcessingConfig:
     # needs it is skipped with a warning (warn-and-skip). These are the
     # resolver's force levers; Stage 5b wires them into the loop and
     # supersedes the legacy stft_cache_enabled / cache_base_matrix gates.
-    base_matrix_enabled: Optional[bool] = None
+    # The base matrix is the foundational Stage-1 product (returned and
+    # clipped by run_loading, and produced even by --load-only with no
+    # analyses), so it defaults force-on; STFT is left resolver-decided.
+    base_matrix_enabled: Optional[bool] = True
     stft_enabled: Optional[bool] = None
 
 

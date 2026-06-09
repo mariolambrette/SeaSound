@@ -204,6 +204,25 @@ def shard_name(source_file: str, channel: int) -> str:
     return f"{base}_ch{channel}{SHARD_SUFFIX}"
 
 
+def shard_complete(stft_dir: str, source_file: str, channel: int) -> bool:
+    """Whether a complete STFT shard exists for a source file + channel.
+
+    Reads only the shard's ``complete`` attribute (metadata, no array
+    data), the same source of truth ``rebuild_manifest_rows`` uses: a
+    missing shard, or a flagless one (a crash artifact), counts as
+    absent — so the resume rule rebuilds it (§12).
+    """
+    path = os.path.join(stft_dir, shard_name(source_file, channel))
+    if not os.path.isdir(path):
+        return False
+    try:
+        group = zarr.open_group(path, mode="r")
+        return bool(group.attrs.get("complete", False))
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("Could not read STFT shard %s: %s", path, exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Writer (incremental, one shard per worker)
 # ---------------------------------------------------------------------------

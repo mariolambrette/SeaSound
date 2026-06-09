@@ -35,6 +35,7 @@ from seasound.loader.calibration import load_calibration, resolve_calibration
 from seasound.loader.base_matrix import BaseMatrixAccumulator, compute_base_matrix
 from seasound.loader.cache import ( #pylint: disable=unused-import
     is_cached,
+    base_matrix_cache_path,
     save_base_matrix,
     load_base_matrix,
     load_all_cached,
@@ -50,6 +51,13 @@ from seasound.loader import stft_store
 from seasound.loader.stft_store import StftShardWriter
 
 from seasound.analysis.calculate_stft import get_stft_for_file
+from seasound.core.substrates import (
+    BASE_MATRIX,
+    STFT,
+    resolve_producers,
+    subtract_cached,
+    validate_substrates,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -202,6 +210,7 @@ def _process_one_file(
     cal_df: Optional[pd.DataFrame],
     cache_dir: str,
     parser: Optional[FilenameParser] = None,
+    resolved: Optional[set[str]] = None,
 ) -> list[SegmentArtifact]:
     """
     Process a single WAV file: read → calibrate → compute matrix.
@@ -213,14 +222,21 @@ def _process_one_file(
     blocks (bit-identical output, per-worker memory bounded by one
     block); otherwise the legacy full-read path runs. The legacy path
     and this flag are removed together at refactor Stage 6.
+
+    ``resolved`` is this run's resolved producer set (§7); when omitted
+    it is computed from ``config`` so direct callers need not supply it.
+    The streaming path produces only ``resolved`` minus this file's
+    already-cached products (per-file subtraction, resume-aware); the
+    legacy path is unchanged and still keyed off the old flags.
     """
+    if resolved is None:
+        resolved = resolve_producers(config)
+
     # Optional STFT cache generation, legacy full-file npz path only.
     # The streaming path produces STFT shards inside its block loop
     # instead (refactor Stage 3): no full-file pre-step, no npz, and
-    # the per-worker peak is bounded by one block. Until Stage 4
-    # re-points the consumers (build_stft_matrix and the spectrogram
-    # analyses) at the shard store, runs that need those outputs can
-    # set streaming_enabled: false to restore the npz behaviour.
+    # the per-worker peak is bounded by one block. The legacy path and
+    # this flag are removed together at Stage 6.
     if config.pipeline.stft_cache_enabled and not config.pipeline.streaming_enabled:
         try:
             get_stft_for_file(wav_path, config, cache_dir)
@@ -229,8 +245,16 @@ def _process_one_file(
             raise
 
     if config.pipeline.streaming_enabled:
+        # Produce only what's missing for this file. With resume off,
+        # reproduce the whole resolved set (overwriting any cache).
+        if config.pipeline.resume:
+            to_produce = subtract_cached(
+                resolved, _cached_products(wav_path, config, cache_dir)
+            )
+        else:
+            to_produce = set(resolved)
         return _process_one_file_streaming(
-            wav_path, config, cal_df, cache_dir, parser
+            wav_path, config, cal_df, cache_dir, to_produce, parser
         )
 
     segments = read_audio(wav_path, config.input, parser=parser)
@@ -284,16 +308,26 @@ def _process_one_file_streaming(
     config: PipelineConfig,
     cal_df: Optional[pd.DataFrame],
     cache_dir: str,
+    to_produce: set[str],
     parser: Optional[FilenameParser] = None,
 ) -> list[SegmentArtifact]:
     """
-    Streaming per-file processing (refactor plan Stages 2-3): one pass
+    Streaming per-file processing (refactor plan Stages 2–3): one pass
     over the file in whole-bin blocks; per output channel, in-place
-    block calibration feeds a BaseMatrixAccumulator and (when
-    stft_cache_enabled) an StftAccumulator writing an STFT shard
-    incrementally. Per-worker memory holds one block plus the
+    block calibration feeds the producers named in ``to_produce`` — a
+    BaseMatrixAccumulator and/or an StftAccumulator writing an STFT
+    shard incrementally. Per-worker memory holds one block plus the
     per-channel output arrays — independent of file duration.
+
+    ``to_produce`` is the resolved producer set for this file (§7): the
+    run's resolved producers minus what's already cached. A file
+    processed for STFT only (base already cached) loads its base matrix
+    from cache so the Stage-1 merge still sees its rows, without
+    recomputing it.
     """
+    produce_base = BASE_MATRIX in to_produce
+    produce_stft = STFT in to_produce
+
     with AudioBlockReader(
         wav_path,
         config.input,
@@ -302,24 +336,26 @@ def _process_one_file_streaming(
     ) as reader:
         # Per-file calibration state, resolved before any samples are
         # read (the reader duck-types via .serial / .source_file).
-        resolved = resolve_calibration(reader, cal_df, config.calibration) #type: ignore
+        resolved = resolve_calibration(reader, cal_df, config.calibration)
 
-        # One accumulator per output channel, single pass (plan Stage 2;
-        # under 'auto' the per-worker peak scales with channel count,
-        # never with file length).
+        # One base-matrix accumulator per output channel, single pass —
+        # only when producing the base matrix (plan Stage 2; under
+        # 'auto' the per-worker peak scales with channel count, never
+        # with file length).
         accumulators: dict[int, BaseMatrixAccumulator] = {}
-        for ch in reader.channels:
-            acc = BaseMatrixAccumulator(
-                reader.sample_rate, reader.n_bins, config.pipeline
-            )
-            acc.set_anchor(reader.datetime_start)
-            accumulators[ch] = acc
+        if produce_base:
+            for ch in reader.channels:
+                acc = BaseMatrixAccumulator(
+                    reader.sample_rate, reader.n_bins, config.pipeline
+                )
+                acc.set_anchor(reader.datetime_start)
+                accumulators[ch] = acc
 
         # STFT shards (plan Stage 3): same blocks, second producer.
         # The store is datetime-addressed, so a file without a parsed
         # start time cannot have a shard (build_stft_matrix likewise
         # skips such files); warn and continue with the base matrix.
-        stft_enabled = bool(config.pipeline.stft_cache_enabled)
+        stft_enabled = produce_stft
         if stft_enabled and reader.datetime_start is None:
             logger.warning(
                 "No datetime for %s; STFT shard skipped (store is "
@@ -357,17 +393,17 @@ def _process_one_file_streaming(
                         stft_store.stft_dir_for(cache_dir),
                         stft_store.shard_name(wav_path, ch),
                     ),
-                    stft_accs[ch].freqs_hz, #type: ignore
+                    stft_accs[ch].freqs_hz,
                     reader.sample_rate,
                     config.pipeline.stft_hop_length,
                     config.pipeline.stft_win_length,
-                    reader.datetime_start, #type: ignore
+                    reader.datetime_start,
                     channel=ch,
                     serial=reader.serial,
                     window=config.pipeline.stft_window,
                     dtype=config.pipeline.stft_dtype,
                     time_chunk_frames=(
-                        config.pipeline.stft_time_chunk_frames #type: ignore
+                        config.pipeline.stft_time_chunk_frames
                     ),
                 )
                 stft_writers[ch] = writer
@@ -386,7 +422,8 @@ def _process_one_file_streaming(
                     raw_block, config.input.channel_strategy, ch
                 )
                 block_pa = resolved.apply_inplace(channel_block)
-                accumulators[ch].push(block_pa, t0)
+                if produce_base:
+                    accumulators[ch].push(block_pa, t0)
 
                 if stft_enabled:
                     # Same calibrated samples, second producer; the
@@ -399,7 +436,7 @@ def _process_one_file_streaming(
             # bin, which the whole-bin blocks exclude. Feed it to the
             # STFT producers only; the base matrix drops it, exactly
             # as the legacy compute_base_matrix did.
-            tail = reader.read_tail() #pylint: disable=no-member #type: ignore
+            tail = reader.read_tail()
             if tail is not None:
                 for ch in reader.channels:
                     channel_tail = extract_channel_block(
@@ -409,7 +446,15 @@ def _process_one_file_streaming(
 
         artifacts: list[SegmentArtifact] = []
         for ch in reader.channels:
-            matrix = accumulators[ch].finalise(reader.datetime_start)
+            if produce_base:
+                matrix = accumulators[ch].finalise(reader.datetime_start)
+            else:
+                # STFT-only run for a file whose base matrix is already
+                # cached: load it so the Stage-1 merge still sees its
+                # rows — no recompute, parquet untouched.
+                matrix = load_base_matrix(
+                    base_matrix_cache_path(wav_path, ch, cache_dir)
+                )
 
             if stft_enabled:
                 # Discards the trailing carry (legacy parity) and seals
@@ -430,7 +475,11 @@ def _process_one_file_streaming(
                     )
 
             cache_paths: list[str] = []
-            if config.pipeline.cache_base_matrix:
+            if produce_base:
+                # Producing the base matrix means caching it — the
+                # resolver and resume rule treat the parquet as the
+                # base-matrix product (the legacy cache_base_matrix
+                # gate no longer applies on the streaming path).
                 # save_base_matrix consumes segment *metadata* only; the
                 # streaming path has no sample array, so it passes an
                 # empty placeholder.
@@ -464,12 +513,14 @@ def _process_one_file_streaming(
 
 def _worker_fn(args):
     """Wrapper for multiprocessing (can't pickle lambdas)."""
-    wav_path, config, cal_df, cache_dir = args
+    wav_path, config, cal_df, cache_dir, resolved = args
     # Create parser inside each worker (parser objects may not be picklable)
     parser = get_parser(config.input)
     t0 = time_module.time()
     try:
-        artifacts = _process_one_file(wav_path, config, cal_df, cache_dir, parser)
+        artifacts = _process_one_file(
+            wav_path, config, cal_df, cache_dir, parser, resolved=resolved
+        )
         return True, time_module.time() - t0, artifacts
     except Exception as exc:
         logger.error(f"Error processing {wav_path}: {exc}")
@@ -502,11 +553,19 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         )
     logger.info(f"Found {len(wav_files)} audio file(s)")
 
+    # Resolve which products this run must produce (refactor §7), and
+    # surface warn-and-skip warnings for any enabled analysis whose
+    # required substrate has been force-disabled.
+    resolved = resolve_producers(config)
+    for warning in validate_substrates(config):
+        logger.warning(warning)
+    logger.info("Resolved producers: %s", ", ".join(sorted(resolved)) or "(none)")
+
     # Filter already-cached files if resume=True
     if config.pipeline.resume:
         files_to_process = [
             f for f in wav_files
-            if not _is_fully_cached(f, config, cache_dir)
+            if not _is_fully_cached(f, config, cache_dir, resolved)
         ]
         files_to_process_set = set(files_to_process)
         skipped_files = [f for f in wav_files if f not in files_to_process_set]
@@ -545,7 +604,10 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
             for i, wav_file in enumerate(files_to_process, 1):
                 t0 = time_module.time()
                 try:
-                    artifacts = _process_one_file(wav_file, config, cal_df, cache_dir, parser)
+                    artifacts = _process_one_file(
+                        wav_file, config, cal_df, cache_dir, parser,
+                        resolved=resolved,
+                    )
                     load_outputs.extend(artifacts)
                     success = True
                 except Exception as exc:
@@ -568,7 +630,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         else:
             # Parallel processing
             args = [
-                (f, config, cal_df, cache_dir) for f in files_to_process
+                (f, config, cal_df, cache_dir, resolved) for f in files_to_process
             ]
             with Pool(n_workers) as pool:
                 for success, dur, artifacts in pool.imap_unordered(_worker_fn, args):
@@ -599,7 +661,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
     # of truth — rather than worker-returned rows, so the manifest
     # always covers every complete shard on disk, including those
     # produced by earlier (resumed) runs.
-    if config.pipeline.streaming_enabled and config.pipeline.stft_cache_enabled:
+    if config.pipeline.streaming_enabled and STFT in resolved:
         stft_dir = stft_store.stft_dir_for(cache_dir)
         shard_rows = stft_store.rebuild_manifest_rows(stft_dir)
         if shard_rows:
@@ -650,26 +712,55 @@ def _expected_channels_for_file(
     return probe_output_channels(wav_path, config.input)
 
 
-def _is_fully_cached(
-    wav_path: str, 
-    config: PipelineConfig, 
+def _cached_products(
+    wav_path: str,
+    config: PipelineConfig,
     cache_dir: str,
-) -> bool:
-    """True only if all expected output channels are present in cache."""
+) -> set[str]:
+    """The products already complete on disk for this file (§12).
+
+    A product counts as cached only when present for **every** expected
+    output channel: base matrix → per-channel parquet; STFT → per-channel
+    complete shard (streaming) or per-channel npz (legacy path). Used by
+    both the resume rule and the per-file producer subtraction.
+    """
     channels = _expected_channels_for_file(wav_path, config)
-    
-    base_ok = all(is_cached(wav_path, ch, cache_dir) for ch in channels)
-    if not base_ok:
-        return False
-    
-    if not config.pipeline.stft_cache_enabled:
-        return True
-    
-    base = os.path.splitext(os.path.basename(wav_path))[0]
-    return all(
-        os.path.isfile(os.path.join(cache_dir, f"{base}_ch{ch}_stft.npz"))
-        for ch in channels
-    )
+    cached: set[str] = set()
+    if not channels:
+        return cached
+
+    if all(is_cached(wav_path, ch, cache_dir) for ch in channels):
+        cached.add(BASE_MATRIX)
+
+    if config.pipeline.streaming_enabled:
+        stft_dir = stft_store.stft_dir_for(cache_dir)
+        if all(
+            stft_store.shard_complete(stft_dir, wav_path, ch) for ch in channels
+        ):
+            cached.add(STFT)
+    else:
+        base = os.path.splitext(os.path.basename(wav_path))[0]
+        if all(
+            os.path.isfile(os.path.join(cache_dir, f"{base}_ch{ch}_stft.npz"))
+            for ch in channels
+        ):
+            cached.add(STFT)
+
+    return cached
+
+
+def _is_fully_cached(
+    wav_path: str,
+    config: PipelineConfig,
+    cache_dir: str,
+    resolved: Optional[set[str]] = None,
+) -> bool:
+    """True iff every product this run resolved to produce is already
+    complete for the file (conjunctive, product-aware; §12). ``resolved``
+    is computed from ``config`` when not supplied."""
+    if resolved is None:
+        resolved = resolve_producers(config)
+    return not subtract_cached(resolved, _cached_products(wav_path, config, cache_dir))
 
 # ---------------------------------------------------------------------------
 # Stage 2: Analysis (placeholder for Phase 2)

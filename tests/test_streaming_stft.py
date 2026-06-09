@@ -35,7 +35,10 @@ from tests.golden import (
 def _streaming_cfg(golden_config, **pipeline_overrides):
     cfg = copy.deepcopy(golden_config)
     cfg.pipeline.streaming_enabled = True
-    cfg.pipeline.stft_cache_enabled = True
+    # Force STFT production via the resolver override (refactor §7). The
+    # streaming path is resolver-driven; the legacy stft_cache_enabled
+    # flag no longer triggers STFT there.
+    cfg.pipeline.stft_enabled = True
     for key, value in pipeline_overrides.items():
         setattr(cfg.pipeline, key, value)
     return cfg

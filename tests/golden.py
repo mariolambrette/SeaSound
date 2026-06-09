@@ -138,30 +138,38 @@ def streamed_base_matrix_artifacts(
 ) -> list[dict[str, Any]]:
     """
     Candidate function for the Stage 2 gates: run the real streaming
-    pipeline path (_process_one_file_streaming) on one file with cache
-    writes disabled, returning artifacts in the same dict shape as
-    legacy_base_matrix_artifacts.
+    pipeline path (_process_one_file_streaming) on one file, returning
+    artifacts in the same dict shape as legacy_base_matrix_artifacts.
+
+    The comparison uses the in-memory ``base_matrix``; producing it now
+    also caches it (the resolver path no longer has a produce-without-
+    cache mode), so a throwaway temp cache directory absorbs the write.
     """
+    import tempfile
+
     # Imported lazily so golden.py stays importable without the
     # pipeline's orchestration dependencies.
     from seasound.core.pipeline import _process_one_file_streaming
+    from seasound.core.substrates import BASE_MATRIX
 
     cfg = copy.deepcopy(config)
     cfg.pipeline.streaming_enabled = True
-    cfg.pipeline.cache_base_matrix = False
     cal_df = load_calibration(cfg.calibration)
 
-    artifacts = _process_one_file_streaming(wav_path, cfg, cal_df, cache_dir="")
-    return [
-        {
-            "channel": a.channel,
-            "serial": a.serial,
-            "datetime_start": a.datetime_start,
-            "calibrated": a.calibrated,
-            "base_matrix": a.base_matrix,
-        }
-        for a in artifacts
-    ]
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as cache_dir:
+        artifacts = _process_one_file_streaming(
+            wav_path, cfg, cal_df, cache_dir, {BASE_MATRIX}
+        )
+        return [
+            {
+                "channel": a.channel,
+                "serial": a.serial,
+                "datetime_start": a.datetime_start,
+                "calibrated": a.calibrated,
+                "base_matrix": a.base_matrix,
+            }
+            for a in artifacts
+        ]
 
 
 def streamed_stft_entries(
@@ -182,11 +190,11 @@ def streamed_stft_entries(
     import tempfile
 
     from seasound.core.pipeline import _process_one_file_streaming
+    from seasound.core.substrates import BASE_MATRIX, STFT
     from seasound.loader.stft_store import StftStore, frame_times_s
 
     cfg = copy.deepcopy(config)
     cfg.pipeline.streaming_enabled = True
-    cfg.pipeline.stft_cache_enabled = True
     cfg.pipeline.cache_base_matrix = False
     if block_seconds is not None:
         cfg.pipeline.streaming_block_seconds = block_seconds
@@ -195,7 +203,7 @@ def streamed_stft_entries(
     entries: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as cache_dir:
         artifacts = _process_one_file_streaming(
-            wav_path, cfg, cal_df, cache_dir=cache_dir
+            wav_path, cfg, cal_df, cache_dir, {BASE_MATRIX, STFT}
         )
         for a in artifacts:
             store = StftStore(cache_dir, channel=a.channel)
