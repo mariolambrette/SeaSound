@@ -50,7 +50,7 @@ tests/test_base_matrix.py
 tests/test_build_stft_matrix.py
 tests/test_calculate_stft.py
 tests/test_calibration.py
-tests/test_characterisation_legacy.py
+tests/test_characterisation.py
 tests/test_configs.py
 tests/test_event_detection.py
 tests/test_event_detection_plot_integration.py

@@ -1,13 +1,16 @@
 """
 tests/test_streaming_invariance.py
 
-Streaming-vs-streaming structural properties. Two properties are currently
-proven only through the legacy comparison gates (test_streaming_base_matrix.py):
-base-matrix block independence and duty-cycle gap indexing across a merge.
-Re-expressed here against the streaming path alone, with no legacy oracle, so
-they survive the Stage-6 cleanup that deletes the legacy gates.
+Streaming-vs-streaming structural properties, with no legacy oracle, so they
+survive the Stage-6 cleanup that deletes the legacy gates:
 
-(STFT seam independence is already covered legacy-free by
+- base-matrix block independence (identical output across block_seconds);
+- duty-cycle gap indexing across a merged pair, with no off-by-one;
+- two per-file edge behaviours (uncalibrated fallback propagation; a file
+  shorter than the start trim yields no rows) rescued from the deleted
+  streamed-vs-legacy identity class.
+
+(STFT seam independence is covered by
 test_streaming_stft.py::TestAccumulatorContract, which pins the accumulator
 against a single compute_stft_power over many push geometries.)
 """
@@ -59,7 +62,7 @@ class TestBlockIndependence:
 class TestGapIndexing:
     """Duty-cycle gap: two recordings 47 s apart must index correctly across
     the gap and merge with no off-by-one and no duplicates — verified on the
-    streamed output directly, not against legacy."""
+    streamed output directly."""
 
     def test_gap_merge_indexing(self, gapped_wav_pair, golden_config):
         _, (first, second) = gapped_wav_pair  # 13 s @12:00:00, 10 s @12:01:00
@@ -80,3 +83,31 @@ class TestGapIndexing:
         assert len(merged) == 23
         assert merged.index.is_monotonic_increasing
         assert not merged.index.has_duplicates
+
+
+class TestStreamingEdges:
+    """Per-file edge behaviours rescued from the deleted identity class —
+    asserted structurally on the streamed output, no oracle needed."""
+
+    def test_uncalibrated_serial_propagates(self, awkward_wav, golden_config):
+        """An unknown serial under non-strict calibration propagates
+        calibrated=False through to the artifact."""
+        cfg = copy.deepcopy(golden_config)
+        cfg.input.serial_override = "123456"  # not in the fixture table
+        cfg.calibration.strict = False
+
+        artifacts = streamed_base_matrix_artifacts(awkward_wav, cfg)
+        assert artifacts[0]["calibrated"] is False
+
+    def test_file_shorter_than_trim_yields_no_rows(self, tmp_path, test_config):
+        """When the start trim exceeds the file duration, the streamed path
+        produces no base-matrix rows (test_config trims 3 s; the file is 2 s)."""
+        wav = _write_soundtrap_wav(
+            tmp_path / "tiny", "9999",
+            datetime(2026, 1, 1, 12, 0, 0), 2.0, 96000, seed=501,
+        )
+        artifacts = streamed_base_matrix_artifacts(wav, test_config)
+        total_rows = sum(len(a["base_matrix"]) for a in artifacts)
+        assert total_rows == 0, (
+            "a file shorter than the start trim must yield no base-matrix rows"
+        )

@@ -3,24 +3,18 @@ tests/test_golden_baseline.py
 
 Frozen-snapshot regression gate for the streaming path (refactor plan §9,
 option A — a small representative set rather than the full migration matrix;
-the structural properties are covered legacy-free by test_streaming_*.py and
+the structural properties are covered by test_streaming_*.py and
 test_streaming_stft_render.py).
 
 Each case asserts the streaming output equals a committed golden snapshot.
-While the legacy path still exists it also asserts the snapshot is faithful
-to live legacy. The snapshots are seeded once, deliberately:
+The snapshots were originally seeded from the legacy baseline with a
+legacy == streamed cross-check; that oracle is now gone, so regeneration
+captures from the streaming path (which the seed proved equal to legacy):
 
     SEASOUND_UPDATE_GOLDEN=1 python -m pytest tests/test_golden_baseline.py
 
-In that mode each case computes both paths, asserts legacy == streamed (the
-capture-time cross-check, so the committed snapshot is provably the legacy
-baseline), and writes the legacy output to tests/golden_fixtures/. Commit
-those files. Normal runs then compare streamed (and, for now, legacy) against
-the committed snapshot.
-
-Stage 6 removes the legacy path: delete the two lines marked
-"# Stage 6: delete" in each test and the regen branch's legacy cross-check;
-the streamed-vs-snapshot assertion is the surviving gate.
+Regen rewrites tests/golden_fixtures/ — commit those files. Normal runs then
+compare the streaming output against the committed snapshot.
 """
 
 import copy
@@ -31,8 +25,6 @@ import pytest
 from tests.golden import (
     assert_artifacts_identical,
     assert_stft_entries_identical,
-    legacy_base_matrix_artifacts,
-    legacy_stft_entries,
     streamed_base_matrix_artifacts,
     streamed_stft_entries,
 )
@@ -93,18 +85,11 @@ def test_base_matrix_golden(snapshot_id, wav_fixture, cfg_fixture, mutate, reque
     streamed = streamed_base_matrix_artifacts(wav, cfg)
 
     if _UPDATE:
-        legacy = legacy_base_matrix_artifacts(wav, cfg)
-        assert_artifacts_identical(
-            legacy, streamed, context=f"{snapshot_id} capture cross-check"
-        )
-        save_base_matrix_snapshot(snapshot_id, legacy)
+        save_base_matrix_snapshot(snapshot_id, streamed)
         return
 
     golden = load_base_matrix_snapshot(snapshot_id)
     assert_artifacts_identical(golden, streamed, context=f"{snapshot_id} streamed")
-    # Stage 6: delete the next two lines (legacy oracle removed).
-    legacy = legacy_base_matrix_artifacts(wav, cfg)
-    assert_artifacts_identical(golden, legacy, context=f"{snapshot_id} faithfulness")
 
 
 @pytest.mark.parametrize(
@@ -121,15 +106,8 @@ def test_stft_golden(
     streamed = streamed_stft_entries(wav, cfg, block_seconds=block_seconds)
 
     if _UPDATE:
-        legacy = legacy_stft_entries(wav, cfg)
-        assert_stft_entries_identical(
-            legacy, streamed, context=f"{snapshot_id} capture cross-check"
-        )
-        save_stft_snapshot(snapshot_id, legacy)
+        save_stft_snapshot(snapshot_id, streamed)
         return
 
     golden = load_stft_snapshot(snapshot_id)
     assert_stft_entries_identical(golden, streamed, context=f"{snapshot_id} streamed")
-    # Stage 6: delete the next two lines (legacy oracle removed).
-    legacy = legacy_stft_entries(wav, cfg)
-    assert_stft_entries_identical(golden, legacy, context=f"{snapshot_id} faithfulness")

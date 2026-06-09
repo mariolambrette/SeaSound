@@ -1,135 +1,35 @@
 """
 tests/golden.py
 
-Golden-baseline helpers for the streaming refactor.
+Streaming-path reference helpers and bit-identity assertions for the suite.
 
-The float32 codebase at the branch point (tag: golden-float32-baseline)
-is the reference implementation for the whole refactor. These helpers
-expose its per-file outputs through two reference functions, plus
-assertion helpers that gate every later stage:
+The legacy non-streaming path has been removed, so the live legacy oracle is
+gone; the absolute-value baseline now lives in committed snapshots (see
+test_golden_baseline.py / tests/golden_io.py). What remains here is the
+*streamed* per-file reference used to seed and check those snapshots, plus the
+bit-identity assertion helpers shared across the suite:
 
-- ``legacy_base_matrix_artifacts``: the per-file base-matrix output,
-  exactly as ``_process_one_file`` produces it (read -> calibrate ->
-  compute -> DatetimeIndex). Stage 2's ``BaseMatrixAccumulator`` must be
-  *bit-identical* to this (refactor plan section 9, tests 1-2).
-- ``legacy_stft_entries``: the per-file STFT output of
-  ``get_stft_for_file`` with caching forced off. Stage 3's
-  ``StftAccumulator`` must match it frame-for-frame (plan tests 3-4).
-
-The comparisons stay live (both sides computed at test time) until the
-legacy paths are deleted in Stage 6, at which point the reference side
-is replaced by committed snapshot fixtures generated from the last
-dual-path commit.
+- ``streamed_base_matrix_artifacts`` / ``streamed_stft_entries``: run the real
+  streaming pipeline path on one file and return its per-channel output.
+- ``assert_*_identical``: bit-identity comparisons (np.array_equal, NaN-aware)
+  over base matrices and STFT entries.
 """
 
 from __future__ import annotations
 
 import copy
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from seasound.core.config import PipelineConfig
-from seasound.loader.reader import read_audio
-from seasound.loader.filename_parsers import get_parser
-from seasound.loader.calibration import load_calibration, apply_calibration
-from seasound.loader.base_matrix import compute_base_matrix
-from seasound.analysis.calculate_stft import get_stft_for_file
+from seasound.loader.calibration import load_calibration
 
 
 # ---------------------------------------------------------------------------
-# Reference functions (legacy paths)
+# Streaming reference functions
 # ---------------------------------------------------------------------------
-
-
-def legacy_base_matrix_artifacts(
-    wav_path: str,
-    config: PipelineConfig,
-) -> list[dict[str, Any]]:
-    """
-    Run one file through the legacy per-file base-matrix path.
-
-    Mirrors ``seasound.core.pipeline._process_one_file`` step for step
-    (read -> calibrate -> compute -> DatetimeIndex conversion), without
-    cache writes. Note the DatetimeIndex conversion reproduces the
-    pipeline's hardcoded ``freq="1s"`` — faithful to current behaviour
-    even though it ignores ``base_resolution_s``.
-
-    Parameters
-    ----------
-    wav_path : str
-        Path to the WAV file.
-    config : PipelineConfig
-        Full pipeline configuration.
-
-    Returns
-    -------
-    list[dict[str, Any]]
-        One entry per output channel with keys: ``channel``, ``serial``,
-        ``datetime_start``, ``calibrated``, ``base_matrix``.
-    """
-    parser = get_parser(config.input)
-    segments = read_audio(wav_path, config.input, parser=parser)
-    cal_df = load_calibration(config.calibration)
-
-    artifacts: list[dict[str, Any]] = []
-    for segment in segments:
-        audio_pa, calibrated = apply_calibration(
-            segment, cal_df, config.calibration
-        )
-        matrix = compute_base_matrix(audio_pa, segment.sample_rate, config.pipeline)
-
-        if (
-            segment.datetime_start is not None
-            and not isinstance(matrix.index, pd.DatetimeIndex)
-        ):
-            dt_index = pd.date_range(
-                start=segment.datetime_start,
-                periods=len(matrix),
-                freq="1s",
-            )
-            matrix = matrix.copy()
-            matrix.index = dt_index
-            matrix.index.name = "datetime"
-
-        artifacts.append({
-            "channel": segment.channel,
-            "serial": segment.serial,
-            "datetime_start": segment.datetime_start,
-            "calibrated": calibrated,
-            "base_matrix": matrix,
-        })
-
-    return artifacts
-
-
-def legacy_stft_entries(
-    wav_path: str,
-    config: PipelineConfig,
-) -> list[dict[str, Any]]:
-    """
-    Run one file through the legacy per-file STFT path, bypassing the
-    npz cache so the result is always a fresh computation.
-
-    Parameters
-    ----------
-    wav_path : str
-        Path to the WAV file.
-    config : PipelineConfig
-        Full pipeline configuration. Not mutated; a deep copy with
-        ``stft_cache_enabled = False`` is used internally.
-
-    Returns
-    -------
-    list[dict[str, Any]]
-        ``get_stft_for_file`` entries: one per channel with keys
-        ``channel``, ``serial``, ``datetime_start``, ``freqs_hz``,
-        ``times_s``, ``power``.
-    """
-    cfg = copy.deepcopy(config)
-    cfg.pipeline.stft_cache_enabled = False
-    return get_stft_for_file(wav_path, cfg, cache_dir="")
 
 
 def streamed_base_matrix_artifacts(
@@ -137,23 +37,21 @@ def streamed_base_matrix_artifacts(
     config: PipelineConfig,
 ) -> list[dict[str, Any]]:
     """
-    Candidate function for the Stage 2 gates: run the real streaming
-    pipeline path (_process_one_file_streaming) on one file, returning
-    artifacts in the same dict shape as legacy_base_matrix_artifacts.
+    Run the real streaming pipeline path (``_process_one_file_streaming``) on
+    one file and return per-channel artifacts: dicts with ``channel``,
+    ``serial``, ``datetime_start``, ``calibrated``, ``base_matrix``.
 
-    The comparison uses the in-memory ``base_matrix``; producing it now
-    also caches it (the resolver path no longer has a produce-without-
-    cache mode), so a throwaway temp cache directory absorbs the write.
+    Producing the base matrix also caches it (the resolver path has no
+    produce-without-cache mode), so a throwaway temp cache absorbs the write.
     """
     import tempfile
 
-    # Imported lazily so golden.py stays importable without the
-    # pipeline's orchestration dependencies.
+    # Imported lazily so golden.py stays importable without the pipeline's
+    # orchestration dependencies.
     from seasound.core.pipeline import _process_one_file_streaming
     from seasound.core.substrates import BASE_MATRIX
 
     cfg = copy.deepcopy(config)
-    cfg.pipeline.streaming_enabled = True
     cal_df = load_calibration(cfg.calibration)
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as cache_dir:
@@ -178,14 +76,13 @@ def streamed_stft_entries(
     block_seconds: int | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Candidate function for the Stage 3 gates: run the real streaming
-    pipeline path with STFT shard production on, then read the shard
-    store back into the same entry shape as ``legacy_stft_entries``.
+    Run the real streaming path with STFT shard production on, then read the
+    shard store back into per-channel entries: dicts with ``channel``,
+    ``serial``, ``datetime_start``, ``freqs_hz``, ``times_s``, ``power``.
 
-    ``times_s`` is reconstructed via the store's single D8
-    implementation (``frame_times_s``), so this candidate exercises the
-    whole chain: carry-buffered compute → shard write → windowed read →
-    timestamp convention.
+    ``times_s`` is reconstructed via the store's single D8 implementation
+    (``frame_times_s``), so this exercises the whole chain: carry-buffered
+    compute → shard write → windowed read → timestamp convention.
     """
     import tempfile
 
@@ -194,8 +91,6 @@ def streamed_stft_entries(
     from seasound.loader.stft_store import StftStore, frame_times_s
 
     cfg = copy.deepcopy(config)
-    cfg.pipeline.streaming_enabled = True
-    cfg.pipeline.cache_base_matrix = False
     if block_seconds is not None:
         cfg.pipeline.streaming_block_seconds = block_seconds
     cal_df = load_calibration(cfg.calibration)
@@ -235,12 +130,12 @@ def assert_base_matrix_identical(
     context: str = "",
 ) -> None:
     """
-    Assert two base matrices are bit-identical: same columns, same
-    index, same values (NaN positions included).
+    Assert two base matrices are bit-identical: same columns, same index, same
+    values (NaN positions included).
 
-    ``np.testing.assert_array_equal`` treats aligned NaNs as equal and
-    reports the first mismatching positions on failure, which is what we
-    want for unreachable-band columns under the "nan" strategy.
+    ``np.testing.assert_array_equal`` treats aligned NaNs as equal and reports
+    the first mismatching positions on failure, which is what we want for
+    unreachable-band columns under the "nan" strategy.
     """
     prefix = f"[{context}] " if context else ""
     assert list(expected.columns) == list(actual.columns), (
@@ -265,8 +160,8 @@ def assert_artifacts_identical(
 ) -> None:
     """
     Assert two per-file artifact lists (as returned by
-    ``legacy_base_matrix_artifacts`` or a candidate implementation with
-    the same shape) are identical: metadata and matrices.
+    ``streamed_base_matrix_artifacts`` or a snapshot loader with the same
+    shape) are identical: metadata and matrices.
     """
     prefix = f"[{context}] " if context else ""
     assert len(expected) == len(actual), (
@@ -292,9 +187,9 @@ def assert_stft_entries_identical(
     context: str = "",
 ) -> None:
     """
-    Assert two per-file STFT entry lists are identical frame-for-frame:
-    same channels, same frequency axis, same frame times, same power
-    values, no missing or duplicated frames.
+    Assert two per-file STFT entry lists are identical frame-for-frame: same
+    channels, same frequency axis, same frame times, same power values, no
+    missing or duplicated frames.
     """
     prefix = f"[{context}] " if context else ""
     assert len(expected) == len(actual), (
@@ -325,38 +220,3 @@ def assert_stft_entries_identical(
             np.asarray(exp["power"]), np.asarray(act["power"]),
             err_msg=f"{prefix}STFT power values differ",
         )
-
-
-def assert_candidate_matches_legacy_base_matrix(
-    candidate_fn: Callable[[str, PipelineConfig], list[dict[str, Any]]],
-    wav_path: str,
-    config: PipelineConfig,
-    *,
-    context: str = "",
-) -> None:
-    """
-    Plug-in gate for later stages: run ``candidate_fn`` (e.g. the
-    streamed Stage 2 path) and the legacy path on the same file and
-    config, and require identical artifacts.
-    """
-    expected = legacy_base_matrix_artifacts(wav_path, config)
-    actual = candidate_fn(wav_path, config)
-    assert_artifacts_identical(expected, actual, context=context)
-
-
-def assert_candidate_matches_legacy_stft(
-    candidate_fn: Callable[[str, PipelineConfig], list[dict[str, Any]]],
-    wav_path: str,
-    config: PipelineConfig,
-    *,
-    context: str = "",
-) -> None:
-    """
-    Plug-in gate for later stages: run ``candidate_fn`` (e.g. the
-    streamed Stage 3 ``StftAccumulator`` path) and the legacy per-file
-    STFT on the same file and config, and require frame-for-frame
-    identical entries.
-    """
-    expected = legacy_stft_entries(wav_path, config)
-    actual = candidate_fn(wav_path, config)
-    assert_stft_entries_identical(expected, actual, context=context)
