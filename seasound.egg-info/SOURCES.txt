@@ -64,4 +64,5 @@ tests/test_spectral_percentiles.py
 tests/test_stft.py
 tests/test_stft_store.py
 tests/test_streaming_base_matrix.py
+tests/test_streaming_stft.py
 tests/tests_plotting_common.py

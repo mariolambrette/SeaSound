@@ -130,10 +130,11 @@ class ProcessingConfig:
     cache_base_matrix: bool = True
     cache_directory: Optional[str] = None
 
-    # Streaming Stage-1 path (refactor plan Stage 2). Transitional
-    # dual-path flag: False keeps the legacy full-read path; True
-    # streams whole-bin blocks (bit-identical output, bounded memory).
-    # The flag and the legacy path are removed together at Stage 6.
+    # Streaming Stage-1 path (refactor plan Stage 2). Default since the
+    # Stage 2 gates passed on synthetic and real data: whole-bin block
+    # streaming, bit-identical to the legacy path with bounded per-worker
+    # memory. Set False to fall back to the legacy full-read path (escape
+    # hatch only; both the flag and the legacy path are removed at Stage 6).
     streaming_enabled: bool = True
     streaming_block_seconds: int = 60
 
@@ -146,6 +147,11 @@ class ProcessingConfig:
     stft_fmin_hz: float = 10.0
     stft_fmax_hz: float = 50000.0
     stft_dtype: str = "float32"    # "float32" | "float16"
+    # zarr chunk length (frames) along the time axis of STFT shards
+    # written by the streaming path (refactor Stage 3). Larger chunks
+    # compress better; smaller chunks make narrow windowed reads
+    # cheaper. The default suits hour-scale consumer windows.
+    stft_time_chunk_frames: int = 8192
 
 
 @dataclass
@@ -304,6 +310,9 @@ def validate(raw: dict) -> PipelineConfig:
 
     if config.pipeline.stft_fmin_hz >= config.pipeline.stft_fmax_hz:
         errors.append("pipeline.stft_fmin_hz must be < pipeline.stft_fmax_hz")
+
+    if config.pipeline.stft_time_chunk_frames <= 0:
+        errors.append("pipeline.stft_time_chunk_frames must be positive")
 
     # --- Calibration validation ---
     if (

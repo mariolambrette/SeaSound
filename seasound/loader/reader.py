@@ -165,7 +165,7 @@ def read_audio(
 
     # --- Read the file ---
     try:
-        audio_data, sample_rate = sf.read(filepath, dtype="float32") # pyright: ignore[reportPossiblyUnboundVariable] #pylint: disable=line-too-long
+        audio_data, sample_rate = sf.read(filepath, dtype="float32") # type: ignore
     except Exception as exc:
         raise ReaderError(f"Could not read {filepath}: {exc}") from exc
 
@@ -389,25 +389,25 @@ class AudioBlockReader:
             raise ReaderError(f"File not found: {self.source_file}")
 
         try:
-            self._sf = sf.SoundFile(self.source_file) # pyright: ignore[reportPossiblyUnboundVariable] #pylint: disable=line-too-long
+            self._sf = sf.SoundFile(self.source_file) #type: ignore
         except Exception as exc:
             raise ReaderError(
                 f"Could not read {self.source_file}: {exc}"
             ) from exc
 
-        self.sample_rate = int(self._sf.samplerate) #pylint: disable=attribute-defined-outside-init
-        self.n_channels = int(self._sf.channels) #pylint: disable=attribute-defined-outside-init
+        self.sample_rate = int(self._sf.samplerate)  #pylint: disable=attribute-defined-outside-init
+        self.n_channels = int(self._sf.channels)  #pylint: disable=attribute-defined-outside-init
         frames = int(self._sf.frames)
 
         # --- Extract metadata from filename ---
         parser = self._parser if self._parser is not None else get_parser(self._config)
         metadata = parser.parse(self.source_file)
-        self.serial = metadata.serial #pylint: disable=attribute-defined-outside-init
-        self.datetime_start = metadata.datetime_start #pylint: disable=attribute-defined-outside-init
+        self.serial = metadata.serial  #pylint: disable=attribute-defined-outside-init
+        self.datetime_start = metadata.datetime_start  #pylint: disable=attribute-defined-outside-init
 
         # serial_override applies regardless of filename_format
         if self._config.serial_override:
-            self.serial = self._config.serial_override #pylint: disable=attribute-defined-outside-init
+            self.serial = self._config.serial_override  #pylint: disable=attribute-defined-outside-init
 
         logger.info(
             "Read %s (streaming): %s Hz, %s, %.1fs",
@@ -420,6 +420,7 @@ class AudioBlockReader:
         # --- Start trim as a seek (same arithmetic as _apply_start_trim) ---
         trim_s = self._config.per_file_trim_start_s
         usable = frames
+        self._trim_frames = 0  #pylint: disable=attribute-defined-outside-init
         if trim_s > 0:
             n_trim = int(round(trim_s * self.sample_rate))
             if n_trim >= frames:
@@ -431,10 +432,11 @@ class AudioBlockReader:
                 usable = 0
             else:
                 self._sf.seek(n_trim)
+                self._trim_frames = n_trim  #pylint: disable=attribute-defined-outside-init
                 usable = frames - n_trim
                 actual_trim_s = n_trim / self.sample_rate
                 if self.datetime_start is not None:
-                    self.datetime_start = self.datetime_start + timedelta( #pylint: disable=attribute-defined-outside-init
+                    self.datetime_start = self.datetime_start + timedelta(  #pylint: disable=attribute-defined-outside-init
                         seconds=actual_trim_s
                     )
                 logger.debug(
@@ -442,8 +444,9 @@ class AudioBlockReader:
                     actual_trim_s, os.path.basename(self.source_file),
                 )
 
-        self._bin_samples = int(self._bin_seconds * self.sample_rate) #pylint: disable=attribute-defined-outside-init
-        self.n_bins = usable // self._bin_samples #pylint: disable=attribute-defined-outside-init
+        self._usable_frames = usable  #pylint: disable=attribute-defined-outside-init
+        self._bin_samples = int(self._bin_seconds * self.sample_rate)  #pylint: disable=attribute-defined-outside-init
+        self.n_bins = usable // self._bin_samples  #pylint: disable=attribute-defined-outside-init
 
         # --- Output channel set under the configured strategy ---
         self.channels = _output_channels(self.n_channels, self._config) #pylint: disable=attribute-defined-outside-init
@@ -498,3 +501,36 @@ class AudioBlockReader:
             )
             yield data, t0
             bins_done += k
+
+    def read_tail(self):
+        """
+        Read the fractional tail: the samples past the last whole bin
+        (always fewer than bin_samples), or None when the usable length
+        divides evenly into bins.
+
+        The base-matrix path must never consume these — the legacy
+        compute_base_matrix drops the partial bin — but the legacy STFT
+        path (read_audio → compute_stft_power) consumed the full
+        trimmed file, so the streamed STFT producer reads the tail to
+        stay frame-for-frame identical (refactor plan §9 test 3).
+
+        Seeks explicitly, so the result does not depend on whether
+        blocks() has run or how far it was consumed.
+        """
+        if self._sf is None:
+            raise ReaderError(
+                "AudioBlockReader.read_tail() called outside the "
+                "context manager"
+            )
+        whole = self.n_bins * self._bin_samples
+        tail_len = self._usable_frames - whole
+        if tail_len <= 0:
+            return None
+        self._sf.seek(self._trim_frames + whole)
+        data = self._sf.read(tail_len, dtype="float32")
+        if len(data) != tail_len:
+            raise ReaderError(
+                f"Short tail read from {self.source_file}: expected "
+                f"{tail_len} samples, got {len(data)}"
+            )
+        return data

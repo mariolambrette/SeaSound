@@ -164,6 +164,57 @@ def streamed_base_matrix_artifacts(
     ]
 
 
+def streamed_stft_entries(
+    wav_path: str,
+    config: PipelineConfig,
+    block_seconds: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Candidate function for the Stage 3 gates: run the real streaming
+    pipeline path with STFT shard production on, then read the shard
+    store back into the same entry shape as ``legacy_stft_entries``.
+
+    ``times_s`` is reconstructed via the store's single D8
+    implementation (``frame_times_s``), so this candidate exercises the
+    whole chain: carry-buffered compute → shard write → windowed read →
+    timestamp convention.
+    """
+    import tempfile
+
+    from seasound.core.pipeline import _process_one_file_streaming
+    from seasound.loader.stft_store import StftStore, frame_times_s
+
+    cfg = copy.deepcopy(config)
+    cfg.pipeline.streaming_enabled = True
+    cfg.pipeline.stft_cache_enabled = True
+    cfg.pipeline.cache_base_matrix = False
+    if block_seconds is not None:
+        cfg.pipeline.streaming_block_seconds = block_seconds
+    cal_df = load_calibration(cfg.calibration)
+
+    entries: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as cache_dir:
+        artifacts = _process_one_file_streaming(
+            wav_path, cfg, cal_df, cache_dir=cache_dir
+        )
+        for a in artifacts:
+            store = StftStore(cache_dir, channel=a.channel)
+            freqs_hz, _times, power = store.read()
+            shard = store.shards.iloc[0]
+            entries.append({
+                "channel": a.channel,
+                "serial": a.serial,
+                "datetime_start": a.datetime_start,
+                "freqs_hz": freqs_hz,
+                "times_s": frame_times_s(
+                    int(shard.n_frames), int(shard.win),
+                    int(shard.hop), int(shard.sample_rate),
+                ),
+                "power": power,
+            })
+    return entries
+
+
 # ---------------------------------------------------------------------------
 # Assertion helpers
 # ---------------------------------------------------------------------------

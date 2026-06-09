@@ -43,6 +43,11 @@ from seasound.loader.cache import ( #pylint: disable=unused-import
 from seasound.loader.filename_parsers import FilenameParser, get_parser
 from seasound.loader.metadata_readers import get_metadata_reader
 from seasound.loader.loaded_artifacts import SegmentArtifact, LoadingOutput #pylint: disable=unused-import
+from seasound.loader.stft import StftAccumulator
+# Module-qualified: stft_store.write_manifest is the SHARD manifest;
+# this module's own write_manifest is the run_manifest.json writer.
+from seasound.loader import stft_store
+from seasound.loader.stft_store import StftShardWriter
 
 from seasound.analysis.calculate_stft import get_stft_for_file
 
@@ -209,18 +214,21 @@ def _process_one_file(
     block); otherwise the legacy full-read path runs. The legacy path
     and this flag are removed together at refactor Stage 6.
     """
-    # Optional STFT cache generation during Stage 1.
-    # This ensures load-only runs can precompute STFT products.
-    # (Still the legacy full-file computation — replaced by the
-    # streaming StftAccumulator at refactor Stage 3.)
-    if config.pipeline.stft_cache_enabled:
+    # Optional STFT cache generation, legacy full-file npz path only.
+    # The streaming path produces STFT shards inside its block loop
+    # instead (refactor Stage 3): no full-file pre-step, no npz, and
+    # the per-worker peak is bounded by one block. Until Stage 4
+    # re-points the consumers (build_stft_matrix and the spectrogram
+    # analyses) at the shard store, runs that need those outputs can
+    # set streaming_enabled: false to restore the npz behaviour.
+    if config.pipeline.stft_cache_enabled and not config.pipeline.streaming_enabled:
         try:
             get_stft_for_file(wav_path, config, cache_dir)
         except Exception as exc:
             logger.error("STFT caching failed for %s: %s", wav_path, exc)
             raise
 
-    if config.pipeline.streaming_enabled: #type: ignore
+    if config.pipeline.streaming_enabled:
         return _process_one_file_streaming(
             wav_path, config, cal_df, cache_dir, parser
         )
@@ -279,11 +287,12 @@ def _process_one_file_streaming(
     parser: Optional[FilenameParser] = None,
 ) -> list[SegmentArtifact]:
     """
-    Streaming per-file processing (refactor plan Stage 2, base matrix
-    only): one pass over the file in whole-bin blocks; per output
-    channel, in-place block calibration feeds a BaseMatrixAccumulator.
-    Per-worker memory holds one block plus the per-channel output
-    arrays — independent of file duration.
+    Streaming per-file processing (refactor plan Stages 2-3): one pass
+    over the file in whole-bin blocks; per output channel, in-place
+    block calibration feeds a BaseMatrixAccumulator and (when
+    stft_cache_enabled) an StftAccumulator writing an STFT shard
+    incrementally. Per-worker memory holds one block plus the
+    per-channel output arrays — independent of file duration.
     """
     with AudioBlockReader(
         wav_path,
@@ -306,8 +315,66 @@ def _process_one_file_streaming(
             acc.set_anchor(reader.datetime_start)
             accumulators[ch] = acc
 
+        # STFT shards (plan Stage 3): same blocks, second producer.
+        # The store is datetime-addressed, so a file without a parsed
+        # start time cannot have a shard (build_stft_matrix likewise
+        # skips such files); warn and continue with the base matrix.
+        stft_enabled = bool(config.pipeline.stft_cache_enabled)
+        if stft_enabled and reader.datetime_start is None:
+            logger.warning(
+                "No datetime for %s; STFT shard skipped (store is "
+                "datetime-addressed)", wav_path,
+            )
+            stft_enabled = False
+
+        stft_accs: dict[int, StftAccumulator] = {}
+        stft_writers: dict[int, StftShardWriter] = {}
+        if stft_enabled:
+            for ch in reader.channels:
+                stft_accs[ch] = StftAccumulator(
+                    sample_rate=reader.sample_rate,
+                    nfft=config.pipeline.stft_nfft,
+                    win_length=config.pipeline.stft_win_length,
+                    hop_length=config.pipeline.stft_hop_length,
+                    window=config.pipeline.stft_window,
+                    fmin_hz=config.pipeline.stft_fmin_hz,
+                    fmax_hz=config.pipeline.stft_fmax_hz,
+                )
+
+        def _stft_push(ch: int, samples_pa) -> None:
+            """Feed calibrated samples to channel ch's accumulator;
+            append any completed frames to its shard. The writer is
+            created lazily on the first completed frames, when the
+            masked frequency axis becomes known from the shared
+            compute."""
+            frames = stft_accs[ch].push(samples_pa)
+            if frames is None:
+                return
+            writer = stft_writers.get(ch)
+            if writer is None:
+                writer = StftShardWriter(
+                    os.path.join(
+                        stft_store.stft_dir_for(cache_dir),
+                        stft_store.shard_name(wav_path, ch),
+                    ),
+                    stft_accs[ch].freqs_hz, #type: ignore
+                    reader.sample_rate,
+                    config.pipeline.stft_hop_length,
+                    config.pipeline.stft_win_length,
+                    reader.datetime_start, #type: ignore
+                    channel=ch,
+                    serial=reader.serial,
+                    window=config.pipeline.stft_window,
+                    dtype=config.pipeline.stft_dtype,
+                    time_chunk_frames=(
+                        config.pipeline.stft_time_chunk_frames #type: ignore
+                    ),
+                )
+                stft_writers[ch] = writer
+            writer.append(frames)
+
         for raw_block, t0 in reader.blocks(
-            config.pipeline.streaming_block_seconds #type: ignore
+            config.pipeline.streaming_block_seconds
         ):
             for ch in reader.channels:
                 # View or per-sample mean of THIS block only; in-place
@@ -321,9 +388,46 @@ def _process_one_file_streaming(
                 block_pa = resolved.apply_inplace(channel_block)
                 accumulators[ch].push(block_pa, t0)
 
+                if stft_enabled:
+                    # Same calibrated samples, second producer; the
+                    # base accumulator does not mutate the block.
+                    _stft_push(ch, block_pa)
+
+        if stft_enabled:
+            # Legacy parity (§9 test 3): the legacy STFT consumed the
+            # file's fractional tail — the samples past the last whole
+            # bin, which the whole-bin blocks exclude. Feed it to the
+            # STFT producers only; the base matrix drops it, exactly
+            # as the legacy compute_base_matrix did.
+            tail = reader.read_tail() #pylint: disable=no-member #type: ignore
+            if tail is not None:
+                for ch in reader.channels:
+                    channel_tail = extract_channel_block(
+                        tail, config.input.channel_strategy, ch
+                    )
+                    _stft_push(ch, resolved.apply_inplace(channel_tail))
+
         artifacts: list[SegmentArtifact] = []
         for ch in reader.channels:
             matrix = accumulators[ch].finalise(reader.datetime_start)
+
+            if stft_enabled:
+                # Discards the trailing carry (legacy parity) and seals
+                # the shard: the complete flag lands in one atomic
+                # metadata write. The manifest row is not carried back —
+                # the coordinator regenerates the manifest from shard
+                # attributes, which also covers shards from prior
+                # (resumed) runs.
+                stft_accs[ch].finalise()
+                writer = stft_writers.get(ch)
+                if writer is not None:
+                    writer.finalise()
+                else:
+                    logger.warning(
+                        "No STFT frames produced for %s ch%d (shorter "
+                        "than stft_win_length?); no shard written",
+                        wav_path, ch,
+                    )
 
             cache_paths: list[str] = []
             if config.pipeline.cache_base_matrix:
@@ -367,10 +471,10 @@ def _worker_fn(args):
     try:
         artifacts = _process_one_file(wav_path, config, cal_df, cache_dir, parser)
         return True, time_module.time() - t0, artifacts
-    except Exception as exc: #pylint: disable=broad-exception-caught
-        logger.error("Error processing %s: %s", wav_path, exc)
+    except Exception as exc:
+        logger.error(f"Error processing {wav_path}: {exc}")
         return False, time_module.time() - t0, []
-
+    
 
 # ---------------------------------------------------------------------------
 # Stage 1: Loading
@@ -396,7 +500,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
             f"No audio files found in {config.input.path} "
             f"matching '{config.input.pattern}'"
         )
-    logger.info("Found %d audio file(s)", len(wav_files))
+    logger.info(f"Found {len(wav_files)} audio file(s)")
 
     # Filter already-cached files if resume=True
     if config.pipeline.resume:
@@ -408,7 +512,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         skipped_files = [f for f in wav_files if f not in files_to_process_set]
         n_skipped = len(skipped_files)
         if n_skipped > 0:
-            logger.info("Resuming: skipping %d fully-cached file(s)", n_skipped)
+            logger.info(f"Resuming: skipping {n_skipped} fully-cached file(s)")
     else:
         files_to_process = wav_files
         skipped_files = []
@@ -427,10 +531,8 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         n_workers = min(n_workers, total)
 
         logger.info(
-            "Processing %d file(s) with %d worker%s",
-            total,
-            n_workers,
-            "s" if n_workers > 1 else "",
+            f"Processing {total} file(s) with "
+            f"{n_workers} worker{'s' if n_workers > 1 else ''}"
         )
 
         durations = []
@@ -440,14 +542,14 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         if n_workers == 1 or total == 1:
             # Serial processing (easier to debug)
             parser = get_parser(config.input)
-            for i, wav_file in enumerate(files_to_process, 1): #pylint: disable=unused-variable
+            for i, wav_file in enumerate(files_to_process, 1):
                 t0 = time_module.time()
                 try:
                     artifacts = _process_one_file(wav_file, config, cal_df, cache_dir, parser)
                     load_outputs.extend(artifacts)
                     success = True
-                except Exception as exc: #pylint: disable=broad-exception-caught
-                    logger.error("Error processing %s: %s", wav_file, exc)
+                except Exception as exc:
+                    logger.error(f"Error processing {wav_file}: {exc}")
                     success = False
                 dur = time_module.time() - t0
                 completed += 1
@@ -459,12 +561,9 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
                 remaining = (total - completed) * avg
                 eta = timedelta(seconds=int(remaining))
                 logger.info(
-                    "[%s/%s] %s (%.1fs) ETA: %s",
-                    completed,
-                    total,
-                    "OK" if success else "FAIL",
-                    dur,
-                    eta,
+                    f"[{completed}/{total}] "
+                    f"{'OK' if success else 'FAIL'} "
+                    f"({dur:.1f}s) ETA: {eta}"
                 )
         else:
             # Parallel processing
@@ -473,7 +572,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
             ]
             with Pool(n_workers) as pool:
                 for success, dur, artifacts in pool.imap_unordered(_worker_fn, args):
-
+                    
                     load_outputs.extend(artifacts)
 
                     completed += 1
@@ -485,16 +584,29 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
                         remaining = (total - completed) * avg
                         eta = timedelta(seconds=int(remaining))
                         logger.info(
-                            "Progress: %d/%d (%d OK) ETA: %s",
-                            completed,
-                            total,
-                            successes,
-                            eta,
+                            f"Progress: {completed}/{total} "
+                            f"({successes} OK) ETA: {eta}"
                         )
 
         logger.info(
-            "Loading complete: %d/%d files processed", successes, total
+            f"Loading complete: {successes}/{total} files processed"
         )
+
+    # STFT shard manifest (refactor Stage 3, D8): written serially by
+    # the coordinator only, after all workers have finished — and on
+    # every run, including a resumed run that skipped every file. The
+    # rows come from a scan of shard attributes — the declared source
+    # of truth — rather than worker-returned rows, so the manifest
+    # always covers every complete shard on disk, including those
+    # produced by earlier (resumed) runs.
+    if config.pipeline.streaming_enabled and config.pipeline.stft_cache_enabled:
+        stft_dir = stft_store.stft_dir_for(cache_dir)
+        shard_rows = stft_store.rebuild_manifest_rows(stft_dir)
+        if shard_rows:
+            stft_store.write_manifest(shard_rows, stft_dir)
+            logger.info(
+                "STFT manifest written: %d shard(s)", len(shard_rows)
+            )
 
     # Load all cached matrices (including previously cached ones)
     in_memory_frames = [a.base_matrix for a in load_outputs]
@@ -517,9 +629,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
             (full_matrix.index >= clip_start) & (full_matrix.index <= clip_end)
         ]
         logger.info(
-            "Deployment clipping: %d → %d rows",
-            before,
-            len(full_matrix)
+            f"Deployment clipping: {before:,} → {len(full_matrix):,} rows"
         )
 
     return full_matrix
@@ -541,20 +651,20 @@ def _expected_channels_for_file(
 
 
 def _is_fully_cached(
-    wav_path: str,
-    config: PipelineConfig,
+    wav_path: str, 
+    config: PipelineConfig, 
     cache_dir: str,
 ) -> bool:
     """True only if all expected output channels are present in cache."""
     channels = _expected_channels_for_file(wav_path, config)
-
+    
     base_ok = all(is_cached(wav_path, ch, cache_dir) for ch in channels)
     if not base_ok:
         return False
-
+    
     if not config.pipeline.stft_cache_enabled:
         return True
-
+    
     base = os.path.splitext(os.path.basename(wav_path))[0]
     return all(
         os.path.isfile(os.path.join(cache_dir, f"{base}_ch{ch}_stft.npz"))
@@ -582,7 +692,7 @@ def run_analyses(base_matrix: pd.DataFrame, config: PipelineConfig) -> dict:
         Per-module results: {name → {"outputs", "summary", "warnings"}}.  
     """
     from seasound.analysis.registry import get_analysis
-
+    
     results = {}
     analyses = config.analyses or {}
 
@@ -594,48 +704,48 @@ def run_analyses(base_matrix: pd.DataFrame, config: PipelineConfig) -> dict:
         "cache_dir": cache_dir,
         "input_files": find_audio_files(config),
     }
-
+    
     for name, entry in analyses.items():
         # Skip disabled analyses
         if not isinstance(entry, dict) or not entry.get("enabled", False):
-            logger.debug("Skipping disabled analysis: %s", name)
+            logger.debug(f"Skipping disabled analysis: {name}")
             continue
-
+        
         required = entry.get("required", True)
-
+        
         try:
             # Instantiate and validate module
             module = get_analysis(name)
             module.set_runtime_context(runtime_context)
             module_cfg = entry.get("config", {})
             module.validate_config(module_cfg)
-
+            
             # Run analysis
-            logger.info("Running analysis: %s (required=%s)", name, required)
+            logger.info(f"Running analysis: {name} (required={required})")
             res = module.run(base_matrix, module_cfg, config.output.directory)
-
+            
             results[name] = {
                 "outputs": res.outputs,
                 "summary": res.summary,
                 "warnings": res.warnings,
             }
-
+            
             # Log warnings if any
             if res.warnings:
                 for warning in res.warnings:
-                    logger.warning("  [%s] %s", name, warning)
-
-        except Exception as e: #pylint: disable=broad-exception-caught
+                    logger.warning(f"  [{name}] {warning}")
+        
+        except Exception as e:
             if required:
-                logger.error("Required analysis '%s' failed: %s", name, e)
+                logger.error(f"Required analysis '{name}' failed: {e}")
                 raise
             else:
-                logger.warning("Optional analysis '%s' failed (continuing): %s", name, e)
+                logger.warning(f"Optional analysis '{name}' failed (continuing): {e}")
                 continue
-
+    
     if not results:
         logger.info("No enabled analyses found in config")
-
+    
     return results
 
 
@@ -680,15 +790,15 @@ def write_manifest(
             "base_resolution_s": config.pipeline.base_resolution_s,
         },
     }
-
+    
     # Add analysis results if present
     if analysis_results:
         manifest["analyses"] = analysis_results
-
+    
     path = os.path.join(output_dir, "run_manifest.json")
-    with open(path, "w") as f: #pylint: disable=unspecified-encoding
+    with open(path, "w") as f:
         json.dump(manifest, f, indent=2)
-    logger.info("Manifest written: %s", path)
+    logger.info(f"Manifest written: {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -758,7 +868,7 @@ def run_plot_mode(
         If given, read the matching `analyses.<kind>.config.plot` block to
         configure the plot. Otherwise built-in defaults are used.
     """
-    import os #pylint: disable=redefined-outer-name
+    import os
     import matplotlib.pyplot as plt
 
     if not os.path.isfile(csv_path):
@@ -772,12 +882,10 @@ def run_plot_mode(
             raw = load_yaml(config_path)
             an = raw.get("analyses", {}).get(kind, {}) or {}
             plot_cfg = (an.get("config", {}) or {}).get("plot", {}) or {}
-        except Exception as exc: #pylint: disable=broad-exception-caught
+        except Exception as exc:
             logger.warning(
-                "Could not load plot config from %s: %s; "
-                "using defaults.",
-                config_path,
-                exc
+                f"Could not load plot config from {config_path}: {exc}; "
+                f"using defaults."
             )
 
     # --- Build plotter and figure ---
@@ -825,7 +933,7 @@ def run_plot_mode(
     dpi = plot_cfg.get("dpi", 300)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Plot written: %s", output_path)
+    logger.info(f"Plot written: {output_path}")
 
 def cli_main():
     """CLI entry point (called by the `seasound` command)."""
@@ -858,7 +966,7 @@ def cli_main():
     )
     parser.add_argument(
         "--analyse-only", action="store_true",
-        help="Run analysis only (requires existing cache). Useful if running new analyses on previously loaded data." #pylint: disable=line-too-long
+        help="Run analysis only (requires existing cache). Useful if running new analyses on previously loaded data."
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -907,8 +1015,8 @@ def cli_main():
                 config_path=args.config,
             )
         except SeaSoundError as exc:
-            logger.error("\nPlot error: %s", exc)
-            raise SystemExit(1) from exc
+            logger.error(f"\nPlot error: {exc}")
+            raise SystemExit(1)   
 
     # List analyses if requested
     if args.list_analyses:
@@ -930,8 +1038,8 @@ def cli_main():
     try:
         config = load_config(args.config, overrides)
     except SeaSoundError as exc:
-        logger.error("\nConfiguration error:\n%s", exc)
-        raise SystemExit(1) from exc
+        print(f"\nConfiguration error:\n{exc}")
+        raise SystemExit(1)
 
     # Apply runtime flags
     config.load_only = args.load_only
@@ -945,20 +1053,20 @@ def cli_main():
     # Dry run
     if config.dry_run:
         files = find_audio_files(config)
-        print("\nDry run:")
+        print(f"\nDry run:")
         print(f"  Config: {args.config}")
         print(f"  Input:  {config.input.path}")
         print(f"  Files:  {len(files)}")
         print(f"  Output: {config.output.directory}")
-        print("\nConfig validated successfully.")
+        print(f"\nConfig validated successfully.")
         return
 
     # Run
     try:
         run_pipeline(config)
     except SeaSoundError as exc:
-        logger.error("\nPipeline error: %s", exc)
-        raise SystemExit(1) from exc
+        logger.error(f"\nPipeline error: {exc}")
+        raise SystemExit(1)
     except KeyboardInterrupt:
         logger.warning("\nInterrupted by user")
-        raise SystemExit(130) #pylint: disable=raise-missing-from
+        raise SystemExit(130)

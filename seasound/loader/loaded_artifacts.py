@@ -1,4 +1,7 @@
-"""Artifacts to store the outputs of data loading as python objects."""
+"""
+loader/loaded_artifacts.py
+Artifacts to store the outputs of data loading as python objects.
+"""
 
 from dataclasses import dataclass, field
 from datetime import datetime
