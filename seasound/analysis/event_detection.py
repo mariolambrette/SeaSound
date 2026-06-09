@@ -2,19 +2,6 @@
 seasound/analysis/event_detection.py
 
 Event detection analysis module with pluggable detector algorithms.
-
-This module follows the two-level registry pattern used elsewhere in SeaSound.
-The outer level is EventDetectionAnalysis, registered with ANALYSIS_REGISTRY.
-The inner level is DETECTOR_REGISTRY, mapping algorithm names to EventDetector
-implementations.
-
-A single EventDetectionAnalysis.run() invocation can execute any combination of
-registered detectors, producing one CSV output per detector.
-
-To add a new detector:
-    1. Subclass EventDetector
-    2. Implement validate_config() and detect()
-    3. Call register_detector("name", YourDetector) at module load time
 """
 
 import logging
@@ -36,12 +23,6 @@ from seasound.analysis.registry import register_analysis
 logger = logging.getLogger(__name__)
 
 
-# =========================================================================
-# Canonical event schema
-# =========================================================================
-# Minimal columns every detector must produce. Detector-specific columns
-# are appended after these.
-
 CANONICAL_EVENT_COLUMNS: list[str] = [
     "detector",
     "event_id",
@@ -53,42 +34,14 @@ CANONICAL_EVENT_COLUMNS: list[str] = [
 ]
 
 
-
-# =========================================================================
-# Detector interface and registry
-# =========================================================================
-
 class EventDetector(ABC):
-    """
-    Base class for event-detection algorithms.
-
-    Subclasses must:
-    - Set the `name` class attribute (matches the YAML 'type' field).
-    - Implement validate_config().
-    - Implement detect().
-    """
+    """Base class for event-detection algorithms."""
 
     name: str
 
     @abstractmethod
     def validate_config(self, cfg: dict, shared_cfg: dict) -> None:
-        """
-        Validate the detector-specific configuration.
-
-        Parameters
-        ----------
-        cfg : dict
-            This detector's config block, i.e. one entry from
-            analyses.event_detection.config.detectors.
-        shared_cfg : dict
-            Shared event_detection config (e.g. output_format). Excludes the
-            'detectors' key.
-
-        Raises
-        ------
-        ValueError
-            With a multi-line message listing every problem found.
-        """
+        """Validate the detector-specific configuration."""
 
     @abstractmethod
     def detect(
@@ -97,26 +50,7 @@ class EventDetector(ABC):
         cfg: dict,
         shared_cfg: dict,
     ) -> pd.DataFrame:
-        """
-        Run detection on the base matrix.
-
-        Parameters
-        ----------
-        base_matrix : pd.DataFrame
-            Calibrated 1-second TOB SPL matrix (DateTimeIndex, frequency-named
-            columns ending in 'Hz').
-        cfg : dict
-            This detector's config block.
-        shared_cfg : dict
-            Shared event_detection config.
-
-        Returns
-        -------
-        pd.DataFrame
-            Events conforming to CANONICAL_EVENT_COLUMNS, plus optional
-            detector-specific columns. Empty DataFrame (with correct columns)
-            if no events are detected.
-        """
+        """Run detection on the base matrix."""
 
 
 DETECTOR_REGISTRY: dict[str, Type[EventDetector]] = {}
@@ -155,10 +89,6 @@ def list_detectors() -> dict[str, str]:
     return {n: c.__name__ for n, c in DETECTOR_REGISTRY.items()}
 
 
-# =========================================================================
-# Shared Helpers
-# =========================================================================
-
 def _get_frequency_value(column_name: str) -> float:
     """Parse Hz from a column name like '1000.0Hz'."""
     if not column_name.endswith("Hz"):
@@ -188,16 +118,8 @@ def _filter_freq_range(
 
 
 def _broadband_spl(matrix: pd.DataFrame) -> pd.Series:
-    """
-    Sum band-level SPLs into a single broadband SPL per row.
-
-    L_broadband = 10 * log10( sum_b( 10^(L_b / 10) ) )
-
-    NaN bands are ignored in the sum. Returns a Series with the same
-    DatetimeIndex as `matrix`.
-    """
+    """Sum band-level SPLs into a single broadband SPL per row."""
     linear = np.power(10.0, matrix.to_numpy(dtype=np.float64) / 10.0)
-    # Handle NaNs (e.g. bands above Nyquist) by treating them as zero energy.
     linear = np.where(np.isfinite(linear), linear, 0.0)
     total = linear.sum(axis=1)
     total = np.where(total > 0, total, np.nan)
@@ -205,19 +127,7 @@ def _broadband_spl(matrix: pd.DataFrame) -> pd.Series:
 
 
 def _spectral_centroid(spectrum_db: pd.Series) -> float:
-    """
-    Energy-weighted mean frequency of a single spectrum.
-
-    Parameters
-    ----------
-    spectrum_db : pd.Series
-        Index: column names ending in 'Hz'. Values in dB.
-
-    Returns
-    -------
-    float
-        Centroid frequency in Hz, or NaN if total energy is zero.
-    """
+    """Energy-weighted mean frequency of a single spectrum."""
     freqs = np.array(
         [_get_frequency_value(c) for c in spectrum_db.index],
         dtype=np.float64,
@@ -236,16 +146,7 @@ def _flag_and_merge(
     min_duration_s: int,
     merge_gap_s: int,
 ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    """
-    Convert a boolean flag series into a list of (start, end) event tuples.
-
-    Steps:
-    1. Find runs of contiguous True values.
-    2. Merge adjacent runs whose gap is <= merge_gap_s seconds.
-    3. Drop runs whose duration < min_duration_s.
-
-    Both endpoints are inclusive timestamps from the index of `flags`.
-    """
+    """Convert a boolean flag series into a list of (start, end) event tuples."""
     flags = flags.fillna(False).astype(bool)
     if not flags.any():
         return []
@@ -253,10 +154,9 @@ def _flag_and_merge(
     arr = flags.to_numpy()
     idx = flags.index
 
-    # Edge detection: +1 at start of True run, -1 just after end
     diff = np.diff(arr.astype(np.int8), prepend=0, append=0)
     starts = np.flatnonzero(diff == 1)
-    ends = np.flatnonzero(diff == -1) - 1  # inclusive index
+    ends = np.flatnonzero(diff == -1) - 1
     if len(starts) == 0:
         return []
 
@@ -270,7 +170,6 @@ def _flag_and_merge(
         else:
             merged.append((s, e))
 
-    # Inclusive duration: end - start + 1 second
     final = [
         (s, e) for s, e in merged
         if (e - s).total_seconds() + 1.0 >= min_duration_s
@@ -284,26 +183,7 @@ def _flag_and_merge_array(
     min_duration_s: int,
     merge_gap_s: int,
 ) -> list[tuple[int, int]]:
-    """
-    Vectorised flag-and-merge that returns integer index pairs.
-
-    Faster than _flag_and_merge when applied per-column to a DataFrame's
-    boolean matrix because it operates directly on numpy arrays.
-
-    Parameters
-    ----------
-    flags_arr : np.ndarray of bool, shape (n,)
-        Boolean flags for one band.
-    index : pd.DatetimeIndex
-        Timestamps for the corresponding rows; used to compute gaps and
-        durations in seconds.
-    min_duration_s : int
-    merge_gap_s : int
-
-    Returns
-    -------
-    list of (start_int_idx, end_int_idx) pairs (inclusive).
-    """
+    """Vectorised flag-and-merge that returns integer index pairs."""
     if not flags_arr.any():
         return []
 
@@ -341,14 +221,7 @@ def _build_event_row(
     score_type: str,
     extras: dict | None = None,
 ) -> dict:
-    """
-    Build a canonical event record dict from one (start, end) window.
-
-    Extracts SPL summary statistics from the base-matrix slice and
-    appends any detector-specific extras. Used by detectors that produce
-    one event per time window (e.g. legacy adaptive_threshold). Band-
-    aware detectors build their own row dicts directly.
-    """
+    """Build a canonical event record dict from one (start, end) window."""
     window = base_matrix.loc[start:end]
     if window.empty:
         return {}
@@ -386,10 +259,7 @@ def _build_event_row(
 
 
 def _resolve_base_resolution_s(detector: EventDetector) -> float:
-    """
-    Read base_resolution_s from the runtime context (provided by the
-    analysis-module wrapper). Defaults to 1 second if not present.
-    """
+    """Read base_resolution_s from the runtime context."""
     ctx = (
         getattr(detector, "_get_runtime_context", lambda: {})()
         if hasattr(detector, "_get_runtime_context")
@@ -449,54 +319,16 @@ def _validate_plot_block(
             f"{module_name}.plot.dpi must be a positive integer; got {dpi}"
         )
 
-# =========================================================================
-# Band Threshold Detector
-# =========================================================================
 
 @dataclass
 class BandThresholdDiagnostics:
-    """
-    Per-band rolling statistics from a BandThresholdDetector run.
-
-    Holds the SPL values that were tested plus the rolling baseline and
-    threshold used to flag exceedances. All three DataFrames share the
-    same DatetimeIndex and columns (one per usable band). Consumed by
-    BandThresholdDiagnosticPlotter.
-    """
+    """Per-band rolling statistics from a BandThresholdDetector run."""
     values:    pd.DataFrame
     baseline:  pd.DataFrame
     threshold: pd.DataFrame
 
 class BandThresholdDetector(EventDetector):
-    """
-    Per-band rolling-percentile event detector.
-
-    For each TOB frequency band independently:
-    1. Compute a rolling baseline percentile (e.g. p10) over the previous
-       N hours of recorded data.
-    2. Compute a rolling threshold percentile (e.g. p99) over the same
-       window.
-    3. Flag seconds where band_value > rolling_threshold.
-    4. Merge contiguous flags per band into events.
-    5. Output one CSV row per (band, event).
-
-    This produces a fine-grained event list that supports downstream
-    analysis at any frequency-range granularity. Neighbouring-band
-    clustering is left to downstream tooling.
-
-    Best for: detecting any narrowband or band-localised event that may
-    be invisible to broadband detectors (e.g. tonal sources, vocalising
-    species, electrical interference).
-
-    Notes
-    -----
-    - The rolling window is row-based (number of recorded seconds), so
-      duty-cycle gaps don't truncate the effective baseline length.
-    - Bands with insufficient non-NaN coverage are skipped with a warning.
-    - The threshold IS the rolling percentile — no additional absolute
-      dB margin is applied. A band that's tightly distributed naturally
-      gets a tight threshold; a noisy band gets a wider one.
-    """
+    """Per-band rolling-percentile event detector."""
 
     name = "band_threshold"
 
@@ -604,17 +436,7 @@ class BandThresholdDetector(EventDetector):
         cfg: dict,
         shared_cfg: dict,
     ) -> tuple[pd.DataFrame, BandThresholdDiagnostics | None]:
-        """
-        Run detection and additionally return diagnostic time series for
-        plotting/validation. The diagnostics object holds the per-second
-        values, baseline, and threshold for every band that was usable.
-
-        Returns
-        -------
-        (events_df, diagnostics) :
-            ``diagnostics`` is None if no bands were usable (in which
-            case ``events_df`` is empty).
-        """
+        """Run detection and additionally return diagnostic time series."""
         return self._run(
             base_matrix, cfg, shared_cfg, return_diagnostics=True,
         )
@@ -627,14 +449,7 @@ class BandThresholdDetector(EventDetector):
         *,
         return_diagnostics: bool,
     ) -> tuple[pd.DataFrame, BandThresholdDiagnostics | None]:
-        """
-        Shared implementation of detect / detect_with_diagnostics.
-
-        Implementation note: previously this was the body of detect(); it
-        was moved here so the same code path serves both public entry
-        points without duplication.
-        """
-        # ---- Read config (unchanged from previous detect()) -----------
+        """Shared implementation of detect / detect_with_diagnostics."""
         freq_range = cfg.get(
             "freq_range", self.DEFAULTS.get("freq_range")
         )
@@ -670,7 +485,6 @@ class BandThresholdDetector(EventDetector):
             columns=CANONICAL_EVENT_COLUMNS + extras_columns
         )
 
-        # ---- Filter to working frequency range ------------------------
         working = _filter_freq_range(base_matrix, freq_range)
         if working.empty:
             logger.warning(
@@ -678,7 +492,6 @@ class BandThresholdDetector(EventDetector):
             )
             return empty, None
 
-        # ---- Window sizing (gap-aware row-based) ----------------------
         base_res_s = _resolve_base_resolution_s(self)
         window_rows = max(2, int(bw_hours * 3600 / base_res_s))
         min_periods = max(2, int(window_rows * min_cov))
@@ -692,14 +505,12 @@ class BandThresholdDetector(EventDetector):
             min_periods, bp, tp, min_dur, merge_gap,
         )
 
-        # ---- Rolling baseline and threshold for all bands -------------
         rolling = working.rolling(
             window=window_rows, min_periods=min_periods,
         )
         baseline_df = rolling.quantile(bp / 100.0)
         threshold_df = rolling.quantile(tp / 100.0)
 
-        # ---- Coverage filter ------------------------------------------
         coverage_per_band = threshold_df.notna().sum(axis=0) / max(
             1, len(threshold_df)
         )
@@ -723,7 +534,6 @@ class BandThresholdDetector(EventDetector):
             )
             return empty, None
 
-        # ---- Build per-band events (unchanged from previous detect) --
         records: list[dict] = []
         next_event_id = 1
         index = working.index
@@ -799,7 +609,6 @@ class BandThresholdDetector(EventDetector):
                 })
                 next_event_id += 1
 
-        # ---- Build diagnostics if requested ---------------------------
         diagnostics: BandThresholdDiagnostics | None = None
         if return_diagnostics:
             diagnostics = BandThresholdDiagnostics(
@@ -825,30 +634,8 @@ class BandThresholdDetector(EventDetector):
         return df, diagnostics
 
 
-# =========================================================================
-# Legacy Adaptive Threshold Detector (broadband)
-# =========================================================================
-
 class AdaptiveThresholdLegacyDetector(EventDetector):
-    """
-    Legacy broadband-energy event detector. Retained for comparison runs
-    against the new band_threshold detector.
-
-    Detects events where the energy-summed broadband SPL exceeds a rolling
-    baseline by a configured number of dB. This is the original detector
-    documented in earlier versions of SeaSound; see BandThresholdDetector
-    for the recommended replacement.
-
-    Algorithm
-    ---------
-    1. Sum band-level SPLs into broadband SPL (1 value per second).
-    2. Compute a rolling baseline (e.g. p10 over N hours of recorded data).
-    3. Flag seconds where broadband_spl > baseline + threshold_db.
-    4. Merge contiguous flags into events, drop short ones.
-
-    Best for: detecting strong, broadband transients (vessel passes,
-    pile driving) when narrowband detection is not required.
-    """
+    """Legacy broadband-energy event detector."""
 
     name = "adaptive_threshold_legacy"
 
@@ -894,7 +681,6 @@ class AdaptiveThresholdLegacyDetector(EventDetector):
                 f"{prefix}.baseline_percentile must be in (0, 100); got {bp}"
             )
 
-        # min_duration_s and merge_gap_s: per-detector OR fall back to shared
         for key in ("min_duration_s", "merge_gap_s"):
             value = cfg.get(key, shared_cfg.get(key, self.DEFAULTS[key]))
             ok = isinstance(value, (int, float)) and (
@@ -929,17 +715,14 @@ class AdaptiveThresholdLegacyDetector(EventDetector):
         cfg: dict,
         shared_cfg: dict,
     ) -> pd.DataFrame:
-        # 1. Restrict to broadband frequency range.
         freq_range = cfg.get(
             "broadband_freq_range",
             self.DEFAULTS["broadband_freq_range"],
         )
         working = _filter_freq_range(base_matrix, freq_range)
 
-        # 2. Compute broadband SPL per second.
         broadband = _broadband_spl(working)
 
-        # 3. Rolling baseline over recorded seconds (gap-aware).
         bw_hours = float(cfg.get(
             "baseline_window_hours", self.DEFAULTS["baseline_window_hours"]
         ))
@@ -964,34 +747,9 @@ class AdaptiveThresholdLegacyDetector(EventDetector):
             min_periods_required,
         )
 
-        # --- TEMPORARY DIAGNOSTIC ---
-        diag = pd.DataFrame({
-            "broadband_dB": broadband,
-            "baseline_dB": baseline,
-            "delta_dB": broadband - baseline,
-        })
-        diag.to_csv("./adaptive_threshold_legacy_diagnostic.csv")
-        logger.info(
-            "Diagnostic written. "
-            "broadband range: %.1f to %.1f dB. "
-            "baseline range: %.1f to %.1f dB. "
-            "delta range: %.1f to %.1f dB. "
-            "non-NaN delta count: %s",
-            broadband.min(),
-            broadband.max(),
-            baseline.min(),
-            baseline.max(),
-            (broadband - baseline).min(),
-            (broadband - baseline).max(),
-            (broadband - baseline).notna().sum(),
-        )
-        # --- end diagnostic ---
-
-        # 4. Threshold and flag.
         threshold_db = float(cfg["threshold_db"])
         flags = (broadband > (baseline + threshold_db)).fillna(False)
 
-        # 5. Merge runs. Per-detector config takes precedence over shared.
         min_dur = int(cfg.get(
             "min_duration_s",
             shared_cfg.get("min_duration_s", self.DEFAULTS["min_duration_s"]),
@@ -1002,7 +760,6 @@ class AdaptiveThresholdLegacyDetector(EventDetector):
         ))
         windows = _flag_and_merge(flags, min_dur, merge_gap)
 
-        # 6. Build event records.
         extras_columns = [
             "peak_spl_dB",
             "leq_dB",
@@ -1040,33 +797,8 @@ class AdaptiveThresholdLegacyDetector(EventDetector):
         return pd.DataFrame(records)
 
 
-# =========================================================================
-# PCA Anomaly Detector (parked; kept registered for now)
-# =========================================================================
-
 class PCAAnomalyDetector(EventDetector):
-    """
-    Detects spectral anomalies via PCA reconstruction error.
-
-    NOTE: this detector is parked pending further validation. It is
-    kept in the registry so existing configurations continue to work,
-    but band_threshold is the recommended detector for current use.
-
-    Algorithm
-    ---------
-    1. Standardise the matrix per band (z-score).
-    2. Trim the top `baseline_trim_percentile` rows by intensity (L2
-       norm in z-space) before fitting; this yields a "normal" PCA
-       basis that is robust to existing loud or unusual events.
-    3. Fit PCA via numpy SVD on the trimmed subset. Components selected
-       by `variance_explained` (preferred) or fixed `n_components`.
-    4. For every row of the full matrix, compute reconstruction error
-       ||z - V_k V_k^T z||_2. This is the per-second anomaly score.
-    5. Threshold the score distribution at `threshold_percentile`.
-    6. Merge contiguous flagged seconds and drop short events.
-    7. For each event, the bands contributing most to its mean squared
-       residual are stored in top_band_<j>_hz / top_band_<j>_contribution.
-    """
+    """Detects spectral anomalies via PCA reconstruction error."""
 
     name = "anomaly"
 
@@ -1319,42 +1051,8 @@ class PCAAnomalyDetector(EventDetector):
         return pd.DataFrame(records)
 
 
-# =========================================================================
-# EventDetectionAnalysis — the analysis-module wrapper
-# =========================================================================
-
 class EventDetectionAnalysis(AnalysisModule):
-    """
-    Analysis-module wrapper that runs one or more event detectors.
-
-    Configuration shape:
-
-        event_detection:
-          enabled: true
-          required: false
-          config:
-            output_format: "csv"
-            detectors:
-              - type: "band_threshold"
-                baseline_window_hours: 4
-                baseline_percentile: 10
-                threshold_percentile: 99
-                min_duration_s: 3
-                merge_gap_s: 30
-                ...
-              - type: "adaptive_threshold_legacy"
-                threshold_db: 6.0
-                min_duration_s: 3
-                merge_gap_s: 30
-                ...
-
-    Each detector controls its own min_duration_s and merge_gap_s. If the
-    legacy detectors don't find them in their own config they fall back to
-    shared_cfg, preserving compatibility with older YAMLs.
-
-    Produces one CSV per detector:
-        output/event_detection_<detector_name>.csv
-    """
+    """Analysis-module wrapper that runs one or more event detectors."""
 
     name = "event_detection"
 
@@ -1368,8 +1066,6 @@ class EventDetectionAnalysis(AnalysisModule):
                 f"got '{output_format}'"
             )
 
-        # Shared min_duration_s / merge_gap_s are still accepted for
-        # backward compatibility but are now optional. Validate if present.
         for key in ("min_duration_s", "merge_gap_s"):
             if key in cfg:
                 value = cfg[key]
@@ -1423,7 +1119,6 @@ class EventDetectionAnalysis(AnalysisModule):
                 except ValueError as exc:
                     errors.append(str(exc))
 
-        # --- Per-detector plot blocks ---
         for i, det_cfg in enumerate(cfg.get("detectors", []) or []):
             det_type = det_cfg.get("type", f"<index {i}>")
             if det_type == "band_threshold":
@@ -1455,7 +1150,6 @@ class EventDetectionAnalysis(AnalysisModule):
                             f"max_points_per_panel must be a positive integer"
                         )
 
-        # --- Annotated-spectrogram block ---
         ann = cfg.get("annotated_spectrogram")
         if ann is not None:
             if not isinstance(ann, dict):
@@ -1542,7 +1236,6 @@ class EventDetectionAnalysis(AnalysisModule):
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # Propagate runtime context to each detector instance.
         runtime_context = self._get_runtime_context()
 
         for det_cfg in detector_configs:
@@ -1578,7 +1271,6 @@ class EventDetectionAnalysis(AnalysisModule):
             outputs.append(output_file)
             events_by_detector[det_type] = events_df
 
-            # Per-detector plots
             plot_paths, plot_warns = self._generate_detector_plots(
                 det_type=det_type,
                 diagnostics=diagnostics,
@@ -1601,7 +1293,6 @@ class EventDetectionAnalysis(AnalysisModule):
                 "config": det_cfg,
             }
 
-        # Cross-detector annotated spectrogram
         ann_cfg = cfg.get("annotated_spectrogram") or {}
         if ann_cfg.get("enabled", False):
             ann_paths, ann_warns = self._generate_annotated_spectrogram(
@@ -1715,19 +1406,13 @@ class EventDetectionAnalysis(AnalysisModule):
         ann_cfg: dict,
         output_dir: str,
     ) -> tuple[list[str], list[str]]:
-        """
-        Produce the cross-detector annotated spectrogram.
-
-        Honours ``time_chunk`` in the same way as SpectrogramAnalysis: when
-        set, one figure is produced per non-empty chunk; when null, a single
-        figure spanning the full deployment is produced.
-        """
+        """Produce the cross-detector annotated spectrogram."""
         outputs: list[str] = []
         warnings: list[str] = []
 
         try:
             import matplotlib.pyplot as plt
-            from seasound.core.stft import build_stft_matrix
+            from seasound.core.stft import iter_stft_windows
             from seasound.core.output_layout import (
                 resolve_spectrogram_output_dir,
             )
@@ -1742,33 +1427,10 @@ class EventDetectionAnalysis(AnalysisModule):
 
         runtime_ctx = self._get_runtime_context()
         time_bins = ann_cfg.get("time_bins", 12000)
-        stft_matrix, stft_warns = build_stft_matrix(
-            runtime_ctx, time_bins=time_bins,
-        )
-        warnings.extend(stft_warns)
-        if stft_matrix is None or stft_matrix.empty:
-            msg = (
-                "Annotated spectrogram skipped: STFT data not available. "
-                "Enable the spectrogram analysis or pre-compute STFT and re-run."
-            )
-            warnings.append(msg)
-            logger.warning(msg)
-            return outputs, warnings
+        time_chunk = ann_cfg.get("time_chunk")
+        output_format = ann_cfg.get("output_format", "png")
+        dpi = ann_cfg.get("dpi", 300)
 
-        if not isinstance(stft_matrix.index, pd.DatetimeIndex):
-            msg = (
-                "Annotated spectrogram skipped: STFT matrix has no DatetimeIndex."
-            )
-            warnings.append(msg)
-            logger.warning(msg)
-            return outputs, warnings
-
-        target_dir = resolve_spectrogram_output_dir(
-            output_dir, runtime_ctx.get("pipeline_config"), which="annotated",
-        )
-        os.makedirs(target_dir, exist_ok=True)
-
-        # Restrict events to the requested detectors
         include = ann_cfg.get("include_detectors")
         if include is not None:
             events_subset = {
@@ -1777,31 +1439,31 @@ class EventDetectionAnalysis(AnalysisModule):
         else:
             events_subset = dict(events_by_detector)
 
-        output_format = ann_cfg.get("output_format", "png")
-        dpi = ann_cfg.get("dpi", 300)
-        time_chunk = ann_cfg.get("time_chunk")
-
         def _format_ts(ts: pd.Timestamp) -> str:
             return ts.strftime("%Y%m%dT%H%M%S")
 
-        def _iter_time_chunks():
-            """Yield (window_start, window_end, stft_slice) per non-empty chunk."""
-            if time_chunk is None:
-                yield (
-                    stft_matrix.index.min(),
-                    stft_matrix.index.max(),
-                    stft_matrix,
-                )
-                return
-            for _, group in stft_matrix.resample(time_chunk):
-                if group.empty:
-                    continue
-                yield group.index.min(), group.index.max(), group
-
-        # Sequential chunk index — matches SpectrogramAnalysis's filename scheme
+        # Windowed STFT reads on the global downsampling grid (§8): one
+        # figure per time_chunk window, each loading only its own native
+        # frames. The per-window arrays match slicing the legacy
+        # globally-downsampled matrix (gated, §9 test 7). target_dir is
+        # created lazily on the first window so a store with no STFT
+        # shards skips cleanly.
+        target_dir: str | None = None
         for i, (window_start, window_end, stft_slice) in enumerate(
-            _iter_time_chunks()
+            iter_stft_windows(
+                runtime_ctx,
+                time_chunk=time_chunk,
+                time_bins=time_bins,
+                warnings=warnings,
+            )
         ):
+            if target_dir is None:
+                target_dir = resolve_spectrogram_output_dir(
+                    output_dir,
+                    runtime_ctx.get("pipeline_config"),
+                    which="annotated",
+                )
+                os.makedirs(target_dir, exist_ok=True)
             try:
                 chunk_events = self._filter_events_to_window(
                     events_subset, window_start, window_end,
@@ -1835,6 +1497,14 @@ class EventDetectionAnalysis(AnalysisModule):
                 warnings.append(msg)
                 logger.warning(msg)
 
+        if target_dir is None:
+            msg = (
+                "Annotated spectrogram skipped: STFT data not available. "
+                "Enable the spectrogram analysis or pre-compute STFT and re-run."
+            )
+            warnings.append(msg)
+            logger.warning(msg)
+
         return outputs, warnings
 
     @staticmethod
@@ -1843,14 +1513,7 @@ class EventDetectionAnalysis(AnalysisModule):
         window_start: pd.Timestamp,
         window_end: pd.Timestamp,
     ) -> dict[str, pd.DataFrame]:
-        """
-        Return a copy of events_by_detector with each DataFrame filtered to
-        events that overlap [window_start, window_end].
-
-        Overlap rule: event.end_time >= window_start AND event.start_time
-        <= window_end. Events spanning chunk boundaries appear on both
-        adjacent chunks (they are not split).
-        """
+        """Return events filtered to those overlapping the window."""
         out: dict[str, pd.DataFrame] = {}
         for det, df in events_by_detector.items():
             if df is None or df.empty:
@@ -1862,10 +1525,6 @@ class EventDetectionAnalysis(AnalysisModule):
             out[det] = df[mask]
         return out
 
-
-# =========================================================================
-# Registration
-# =========================================================================
 
 register_detector("band_threshold", BandThresholdDetector)
 register_detector("adaptive_threshold_legacy", AdaptiveThresholdLegacyDetector)

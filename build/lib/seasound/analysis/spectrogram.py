@@ -14,7 +14,7 @@ import numpy as np
 
 from seasound.analysis.base import AnalysisModule, AnalysisResult, AnalysisModuleError
 from seasound.analysis.registry import register_analysis
-from seasound.analysis.calculate_stft import build_stft_matrix
+from seasound.core.stft import build_stft_matrix
 from seasound.core.output_layout import resolve_spectrogram_output_dir
 
 logger = logging.getLogger(__name__)

@@ -45,6 +45,7 @@ import shutil
 import stat
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
@@ -120,7 +121,7 @@ def _remove_existing_shard(path: str, attempts: int = 5) -> None:
     )
     for attempt in range(attempts):
         try:
-            shutil.rmtree(path, **rmtree_kwargs) #type: ignore
+            shutil.rmtree(path, **rmtree_kwargs)
             return
         except OSError as exc:
             if attempt == attempts - 1:
@@ -306,21 +307,21 @@ class StftShardWriter:
             what="creating shard", path=shard_path,
         )
         self._power = _retry_transient_locks(
-            self._group.create_array, #type: ignore
+            self._group.create_array,
             "power",
             shape=(self._n_freq, 0),
             chunks=(self._n_freq, int(time_chunk_frames)),
             dtype=self._dtype,
-            compressors=zarr.codecs.ZstdCodec(level=codec_level), #type: ignore
+            compressors=zarr.codecs.ZstdCodec(level=codec_level),
             what="creating power array", path=shard_path,
         )
         freq_arr = _retry_transient_locks(
-            self._group.create_array, #type: ignore
+            self._group.create_array,
             "freqs_hz", shape=(self._n_freq,), dtype="float64",
             what="creating frequency axis", path=shard_path,
         )
         _retry_transient_locks(
-            freq_arr.__setitem__, slice(None), self._freqs, #type: ignore
+            freq_arr.__setitem__, slice(None), self._freqs,
             what="writing frequency axis", path=shard_path,
         )
 
@@ -341,7 +342,7 @@ class StftShardWriter:
         if block.shape[1] == 0:
             return
         _retry_transient_locks(
-            self._power.append, block, axis=1, #type: ignore
+            self._power.append, block, axis=1,
             what="appending frames to", path=self.shard_path,
         )
         self._n_frames += block.shape[1]
@@ -374,7 +375,7 @@ class StftShardWriter:
             t_start = t_end = None
 
         _retry_transient_locks(
-            self._group.attrs.update, #type: ignore
+            self._group.attrs.update,
             {
                 "n_frames": self._n_frames,
                 "t_start": t_start.isoformat() if t_start is not None else "",
@@ -387,7 +388,7 @@ class StftShardWriter:
 
         return _row_from_attrs(
             os.path.basename(self.shard_path),
-            dict(self._group.attrs), #type: ignore
+            dict(self._group.attrs),
             self._n_freq,
         )
 
@@ -445,7 +446,7 @@ def rebuild_manifest_rows(stft_dir: str) -> list[dict[str, Any]]:
                     name,
                 )
                 continue
-            rows.append(_row_from_attrs(name, attrs, group["freqs_hz"].shape[0])) #type: ignore
+            rows.append(_row_from_attrs(name, attrs, group["freqs_hz"].shape[0]))
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("Could not read STFT shard %s: %s", name, exc)
     return rows
@@ -475,6 +476,31 @@ def load_manifest(stft_dir: str) -> Optional[pd.DataFrame]:
 # ---------------------------------------------------------------------------
 # Reader (windowed)
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RenderGrid:
+    """
+    The global downsampling grid for windowed rendering (refactor plan
+    §8), computed from the manifest alone — no power arrays are touched.
+
+    Reproduces exactly what the legacy ``build_stft_matrix`` did before
+    chunking: one global ``resample(step).mean()`` over the whole
+    (deduplicated) frame index, applied only when ``step`` exceeds the
+    native frame spacing. ``labels`` are the surviving global bin
+    left-edges (equivalently, the index of the legacy global matrix
+    after ``dropna(how="all")``); when ``do_downsample`` is False they
+    are the native frame datetimes themselves.
+
+    Anchoring the grid here, from a fixed ``origin`` that is itself a
+    global bin edge, is what makes a per-window resample produce labels
+    that are a strict subset of the global labels — so chunked reading
+    has no effect on pixel values.
+    """
+    do_downsample: bool
+    labels: pd.DatetimeIndex
+    origin: Optional[pd.Timestamp] = None
+    step: Optional[pd.Timedelta] = None
 
 
 class StftStore:
@@ -515,7 +541,7 @@ class StftStore:
         if manifest is not None:
             manifest_paths = set(manifest["shard_path"].tolist())
             if manifest_paths == set(on_disk):
-                return manifest.to_dict("records") #type: ignore
+                return manifest.to_dict("records")
             logger.warning(
                 "STFT manifest inconsistent with shards on disk "
                 "(%d listed vs %d complete) — regenerating from shard "
@@ -545,7 +571,7 @@ class StftStore:
                     ),
                     mode="r",
                 )
-                self._freqs_cache = np.asarray(group["freqs_hz"][:]) #type: ignore
+                self._freqs_cache = np.asarray(group["freqs_hz"][:])
         return self._freqs_cache
 
     def extent(self) -> tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
@@ -593,9 +619,9 @@ class StftStore:
 
         for row in overlapping.itertuples():
             group = zarr.open_group(
-                os.path.join(self.stft_dir, row.shard_path), mode="r" #type: ignore
+                os.path.join(self.stft_dir, row.shard_path), mode="r"
             )
-            shard_freqs = np.asarray(group["freqs_hz"][:]) #type: ignore
+            shard_freqs = np.asarray(group["freqs_hz"][:])
             if freqs is None:
                 freqs = shard_freqs
             elif not np.array_equal(freqs, shard_freqs):
@@ -606,15 +632,15 @@ class StftStore:
                 )
 
             dts = frame_datetimes(
-                row.datetime_start, row.n_frames, #type: ignore
-                row.win, row.hop, row.sample_rate, #type: ignore
+                row.datetime_start, row.n_frames,
+                row.win, row.hop, row.sample_rate,
             )
             i0 = dts.searchsorted(t0, side="left")
-            i1 = dts.searchsorted(t1, side="right") #type: ignore
+            i1 = dts.searchsorted(t1, side="right")
             if i1 <= i0:
                 continue
-            time_parts.append(dts[i0:i1].asi8) #type: ignore
-            power_parts.append(group["power"][:, i0:i1]) #type: ignore
+            time_parts.append(dts[i0:i1].asi8)
+            power_parts.append(group["power"][:, i0:i1])
 
         if freqs is None or not time_parts:
             freqs = freqs if freqs is not None else self._freq_axis()
@@ -641,4 +667,106 @@ class StftStore:
             freqs,
             pd.DatetimeIndex(times_ns[keep].view("datetime64[ns]")),
             power[:, keep],
+        )
+
+    def _global_frame_index(
+        self, t0=None, t1=None,
+    ) -> pd.DatetimeIndex:
+        """
+        Every frame datetime in ``[t0, t1]`` (deduplicated keep-first),
+        derived from the manifest alone — no power arrays are opened.
+
+        Matches ``read()``'s dedup exactly: shards are pre-sorted by
+        (t_start, shard_path), frames concatenated in that order, then a
+        stable sort + keep-first on duplicate timestamps, so overlapping
+        files keep the earlier recording's frame.
+        """
+        ext0, ext1 = self.extent()
+        if ext0 is None:
+            return pd.DatetimeIndex([])
+        t0 = pd.Timestamp(t0) if t0 is not None else ext0
+        t1 = pd.Timestamp(t1) if t1 is not None else ext1
+
+        overlapping = self._shards.dropna(subset=["t_start", "t_end"])
+        overlapping = overlapping[
+            (overlapping["t_start"] <= t1) & (overlapping["t_end"] >= t0)
+        ]
+
+        parts: list[np.ndarray] = []
+        for row in overlapping.itertuples():
+            dts = frame_datetimes(
+                row.datetime_start, row.n_frames,
+                row.win, row.hop, row.sample_rate,
+            )
+            i0 = dts.searchsorted(t0, side="left")
+            i1 = dts.searchsorted(t1, side="right")
+            if i1 > i0:
+                parts.append(dts[i0:i1].asi8)
+
+        if not parts:
+            return pd.DatetimeIndex([])
+
+        times_ns = np.concatenate(parts)
+        times_ns = np.sort(times_ns, kind="stable")
+        keep = np.ones(len(times_ns), dtype=bool)
+        keep[1:] = times_ns[1:] != times_ns[:-1]
+        return pd.DatetimeIndex(times_ns[keep].view("datetime64[ns]"))
+
+    def render_grid(
+        self,
+        time_bins: Optional[int] = 12000,
+        t0=None,
+        t1=None,
+    ) -> RenderGrid:
+        """
+        Build the global downsampling grid (§8) from the manifest.
+
+        Reproduces the legacy global step exactly:
+        ``step = max(1.0, total_duration_s / time_bins)`` seconds,
+        applied only when it exceeds the native frame spacing (the
+        median positive gap). The surviving global bin edges are taken
+        from a default-origin ``resample`` of the global frame index —
+        identical to the bins the legacy ``resample(step).mean()`` then
+        ``dropna(how="all")`` would keep — and ``origin`` is set to the
+        first such edge so per-window resamples align to this same grid.
+        """
+        frames = self._global_frame_index(t0, t1)
+        native = RenderGrid(do_downsample=False, labels=frames)
+
+        if (
+            time_bins is None
+            or time_bins <= 0
+            or len(frames) <= 1
+        ):
+            return native
+
+        duration = frames[-1] - frames[0]
+        if not (
+            isinstance(duration, pd.Timedelta) and duration > pd.Timedelta(0)
+        ):
+            return native
+
+        step = pd.Timedelta(seconds=max(1.0, duration.total_seconds() / time_bins))
+
+        diffs = frames.to_series().diff().dropna()
+        positive = diffs[diffs > pd.Timedelta(0)]
+        native_step = positive.median() if len(positive) else pd.Timedelta(0)
+        if not isinstance(native_step, pd.Timedelta):
+            native_step = pd.Timedelta(0)
+
+        if step <= native_step:
+            return native
+
+        # Default-origin resample == the legacy global bins; keep only
+        # occupied bins (every native frame is a full row, so 'occupied'
+        # == survives dropna(how="all")). origin = first global bin edge.
+        counts = pd.Series(1, index=frames).resample(step).count()
+        labels = pd.DatetimeIndex(counts.index[counts.to_numpy() > 0])
+        if len(labels) == 0:
+            return native
+        return RenderGrid(
+            do_downsample=True,
+            labels=labels,
+            origin=pd.Timestamp(labels[0]),
+            step=step,
         )
