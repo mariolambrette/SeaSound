@@ -46,7 +46,7 @@ class AnalysisModule(ABC):
     ) -> AnalysisResult:
         """Execute the analysis on a base matrix."""
 
-    def required_substrates(self, module_cfg: dict | None = None) -> set[str]:
+    def required_substrates(self, module_cfg: dict | None = None) -> set[str]: #pylint: disable=unused-argument
         """Substrates this analysis needs produced for the given config.
 
         Defaults to ``REQUIRES``. Override when the requirement is

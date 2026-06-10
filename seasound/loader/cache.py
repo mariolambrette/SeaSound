@@ -20,7 +20,7 @@ import os
 import logging
 from datetime import datetime #pylint: disable=unused-import
 
-import numpy as np
+import numpy as np #pylint: disable=unused-import
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq

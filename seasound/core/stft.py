@@ -111,7 +111,7 @@ def iter_stft_windows(
         return
     ref_pressure = float(cfg_obj.pipeline.reference_pressure_pa)
 
-    store = StftStore(cache_dir, channel=channel)
+    store = StftStore(cache_dir, channel=channel) #type:ignore
     grid = store.render_grid(time_bins)
     if len(grid.labels) == 0:
         warnings.append(
@@ -133,7 +133,7 @@ def iter_stft_windows(
     for labels in label_groups:
         # Read every native frame whose global bin falls in this window.
         if grid.do_downsample:
-            read_t0, read_t1 = labels[0], labels[-1] + grid.step
+            read_t0, read_t1 = labels[0], labels[-1] + grid.step #type: ignore
         else:
             read_t0, read_t1 = labels[0], labels[-1]
 
@@ -144,7 +144,7 @@ def iter_stft_windows(
             # dB-space mean per global bin, anchored to the global
             # origin so labels are a subset of the global grid; drop
             # empty bins, then keep exactly this window's labels.
-            df = df.resample(grid.step, origin=grid.origin).mean()
+            df = df.resample(grid.step, origin=grid.origin).mean() #type: ignore
             df = df.dropna(how="all")
         df = df.loc[df.index.isin(labels)]
 

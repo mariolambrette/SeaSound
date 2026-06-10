@@ -121,7 +121,7 @@ def _remove_existing_shard(path: str, attempts: int = 5) -> None:
     )
     for attempt in range(attempts):
         try:
-            shutil.rmtree(path, **rmtree_kwargs)
+            shutil.rmtree(path, **rmtree_kwargs) #type: ignore
             return
         except OSError as exc:
             if attempt == attempts - 1:
@@ -326,21 +326,21 @@ class StftShardWriter:
             what="creating shard", path=shard_path,
         )
         self._power = _retry_transient_locks(
-            self._group.create_array,
+            self._group.create_array, #type: ignore
             "power",
             shape=(self._n_freq, 0),
             chunks=(self._n_freq, int(time_chunk_frames)),
             dtype=self._dtype,
-            compressors=zarr.codecs.ZstdCodec(level=codec_level),
+            compressors=zarr.codecs.ZstdCodec(level=codec_level), #type: ignore
             what="creating power array", path=shard_path,
         )
         freq_arr = _retry_transient_locks(
-            self._group.create_array,
+            self._group.create_array, #type: ignore
             "freqs_hz", shape=(self._n_freq,), dtype="float64",
             what="creating frequency axis", path=shard_path,
         )
         _retry_transient_locks(
-            freq_arr.__setitem__, slice(None), self._freqs,
+            freq_arr.__setitem__, slice(None), self._freqs, #type: ignore
             what="writing frequency axis", path=shard_path,
         )
 
@@ -361,7 +361,7 @@ class StftShardWriter:
         if block.shape[1] == 0:
             return
         _retry_transient_locks(
-            self._power.append, block, axis=1,
+            self._power.append, block, axis=1, #type: ignore
             what="appending frames to", path=self.shard_path,
         )
         self._n_frames += block.shape[1]
@@ -394,7 +394,7 @@ class StftShardWriter:
             t_start = t_end = None
 
         _retry_transient_locks(
-            self._group.attrs.update,
+            self._group.attrs.update, #type: ignore
             {
                 "n_frames": self._n_frames,
                 "t_start": t_start.isoformat() if t_start is not None else "",
@@ -407,7 +407,7 @@ class StftShardWriter:
 
         return _row_from_attrs(
             os.path.basename(self.shard_path),
-            dict(self._group.attrs),
+            dict(self._group.attrs), #type: ignore
             self._n_freq,
         )
 
@@ -465,7 +465,7 @@ def rebuild_manifest_rows(stft_dir: str) -> list[dict[str, Any]]:
                     name,
                 )
                 continue
-            rows.append(_row_from_attrs(name, attrs, group["freqs_hz"].shape[0]))
+            rows.append(_row_from_attrs(name, attrs, group["freqs_hz"].shape[0])) #type: ignore
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("Could not read STFT shard %s: %s", name, exc)
     return rows
@@ -560,7 +560,7 @@ class StftStore:
         if manifest is not None:
             manifest_paths = set(manifest["shard_path"].tolist())
             if manifest_paths == set(on_disk):
-                return manifest.to_dict("records")
+                return manifest.to_dict("records") #type: ignore
             logger.warning(
                 "STFT manifest inconsistent with shards on disk "
                 "(%d listed vs %d complete) — regenerating from shard "
@@ -590,7 +590,7 @@ class StftStore:
                     ),
                     mode="r",
                 )
-                self._freqs_cache = np.asarray(group["freqs_hz"][:])
+                self._freqs_cache = np.asarray(group["freqs_hz"][:]) #type: ignore
         return self._freqs_cache
 
     def extent(self) -> tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
@@ -638,9 +638,9 @@ class StftStore:
 
         for row in overlapping.itertuples():
             group = zarr.open_group(
-                os.path.join(self.stft_dir, row.shard_path), mode="r"
+                os.path.join(self.stft_dir, row.shard_path), mode="r" #type: ignore
             )
-            shard_freqs = np.asarray(group["freqs_hz"][:])
+            shard_freqs = np.asarray(group["freqs_hz"][:]) #type: ignore
             if freqs is None:
                 freqs = shard_freqs
             elif not np.array_equal(freqs, shard_freqs):
@@ -651,15 +651,15 @@ class StftStore:
                 )
 
             dts = frame_datetimes(
-                row.datetime_start, row.n_frames,
-                row.win, row.hop, row.sample_rate,
+                row.datetime_start, row.n_frames, #type: ignore
+                row.win, row.hop, row.sample_rate, #type: ignore
             )
             i0 = dts.searchsorted(t0, side="left")
-            i1 = dts.searchsorted(t1, side="right")
+            i1 = dts.searchsorted(t1, side="right") #type: ignore
             if i1 <= i0:
                 continue
-            time_parts.append(dts[i0:i1].asi8)
-            power_parts.append(group["power"][:, i0:i1])
+            time_parts.append(dts[i0:i1].asi8) #type: ignore
+            power_parts.append(group["power"][:, i0:i1]) #type: ignore
 
         if freqs is None or not time_parts:
             freqs = freqs if freqs is not None else self._freq_axis()
@@ -714,13 +714,13 @@ class StftStore:
         parts: list[np.ndarray] = []
         for row in overlapping.itertuples():
             dts = frame_datetimes(
-                row.datetime_start, row.n_frames,
-                row.win, row.hop, row.sample_rate,
+                row.datetime_start, row.n_frames, #type: ignore
+                row.win, row.hop, row.sample_rate, #type: ignore
             )
             i0 = dts.searchsorted(t0, side="left")
-            i1 = dts.searchsorted(t1, side="right")
+            i1 = dts.searchsorted(t1, side="right") #type: ignore
             if i1 > i0:
-                parts.append(dts[i0:i1].asi8)
+                parts.append(dts[i0:i1].asi8) #type: ignore
 
         if not parts:
             return pd.DatetimeIndex([])

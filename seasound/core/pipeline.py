@@ -1,3 +1,4 @@
+#pylint: disable=too-many-lines
 """
 seasound/core/pipeline.py
 
@@ -275,7 +276,7 @@ def _process_one_file_streaming(
     ) as reader:
         # Per-file calibration state, resolved before any samples are
         # read (the reader duck-types via .serial / .source_file).
-        resolved = resolve_calibration(reader, cal_df, config.calibration)
+        resolved = resolve_calibration(reader, cal_df, config.calibration) #type: ignore
 
         # One base-matrix accumulator per output channel, single pass —
         # only when producing the base matrix (plan Stage 2; under
@@ -332,11 +333,11 @@ def _process_one_file_streaming(
                         stft_store.stft_dir_for(cache_dir),
                         stft_store.shard_name(wav_path, ch),
                     ),
-                    stft_accs[ch].freqs_hz,
+                    stft_accs[ch].freqs_hz, #type: ignore
                     reader.sample_rate,
                     config.pipeline.stft_hop_length,
                     config.pipeline.stft_win_length,
-                    reader.datetime_start,
+                    reader.datetime_start, #type: ignore
                     channel=ch,
                     serial=reader.serial,
                     window=config.pipeline.stft_window,
@@ -458,10 +459,10 @@ def _worker_fn(args):
             wav_path, config, cal_df, cache_dir, parser, resolved=resolved
         )
         return True, time_module.time() - t0, artifacts
-    except Exception as exc:
-        logger.error(f"Error processing {wav_path}: {exc}")
+    except Exception as exc: #pylint: disable=broad-exception-caught
+        logger.error("Error processing %s: %s", wav_path, exc)
         return False, time_module.time() - t0, []
-    
+
 
 # ---------------------------------------------------------------------------
 # Stage 1: Loading
@@ -487,7 +488,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
             f"No audio files found in {config.input.path} "
             f"matching '{config.input.pattern}'"
         )
-    logger.info(f"Found {len(wav_files)} audio file(s)")
+    logger.info("Found %d audio file(s)", len(wav_files))
 
     # Preflight (hard error): every enabled analysis must resolve to a
     # registered, instantiable module, else it would contribute no substrate
@@ -515,7 +516,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
     for warning in validate_substrates(config):
         logger.warning(warning)
     logger.info("Resolved producers: %s", ", ".join(sorted(resolved)) or "(none)")
-    
+
     # Filter already-cached files if resume=True
     if config.pipeline.resume:
         files_to_process = [
@@ -526,7 +527,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         skipped_files = [f for f in wav_files if f not in files_to_process_set]
         n_skipped = len(skipped_files)
         if n_skipped > 0:
-            logger.info(f"Resuming: skipping {n_skipped} fully-cached file(s)")
+            logger.info("Resuming: skipping %d fully-cached file(s)", n_skipped)
     else:
         files_to_process = wav_files
         skipped_files = []
@@ -545,8 +546,10 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         n_workers = min(n_workers, total)
 
         logger.info(
-            f"Processing {total} file(s) with "
-            f"{n_workers} worker{'s' if n_workers > 1 else ''}"
+            "Processing %d file(s) with %d worker%s",
+            total,
+            n_workers,
+            "s" if n_workers > 1 else "",
         )
 
         durations = []
@@ -556,7 +559,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
         if n_workers == 1 or total == 1:
             # Serial processing (easier to debug)
             parser = get_parser(config.input)
-            for i, wav_file in enumerate(files_to_process, 1):
+            for i, wav_file in enumerate(files_to_process, 1): #pylint: disable=unused-variable
                 t0 = time_module.time()
                 try:
                     artifacts = _process_one_file(
@@ -565,8 +568,8 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
                     )
                     load_outputs.extend(artifacts)
                     success = True
-                except Exception as exc:
-                    logger.error(f"Error processing {wav_file}: {exc}")
+                except Exception as exc: #pylint: disable=broad-exception-caught
+                    logger.error("Error processing %s: %s", wav_file, exc)
                     success = False
                 dur = time_module.time() - t0
                 completed += 1
@@ -578,9 +581,10 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
                 remaining = (total - completed) * avg
                 eta = timedelta(seconds=int(remaining))
                 logger.info(
-                    f"[{completed}/{total}] "
-                    f"{'OK' if success else 'FAIL'} "
-                    f"({dur:.1f}s) ETA: {eta}"
+                    "[%d/%d] %s (%.1fs) ETA: %s",
+                    completed, total,
+                    'OK' if success else 'FAIL',
+                    dur, eta
                 )
         else:
             # Parallel processing
@@ -589,7 +593,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
             ]
             with Pool(n_workers) as pool:
                 for success, dur, artifacts in pool.imap_unordered(_worker_fn, args):
-                    
+
                     load_outputs.extend(artifacts)
 
                     completed += 1
@@ -601,12 +605,15 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
                         remaining = (total - completed) * avg
                         eta = timedelta(seconds=int(remaining))
                         logger.info(
-                            f"Progress: {completed}/{total} "
-                            f"({successes} OK) ETA: {eta}"
+                            "Progress: %d/%d (%d OK) ETA: %s",
+                            completed,
+                            total,
+                            successes,
+                            eta,
                         )
 
         logger.info(
-            f"Loading complete: {successes}/{total} files processed"
+            "Loading complete: %d/%d files processed", successes, total
         )
 
     # STFT shard manifest (refactor Stage 3, D8): written serially by
@@ -646,14 +653,16 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
             (full_matrix.index >= clip_start) & (full_matrix.index <= clip_end)
         ]
         logger.info(
-            f"Deployment clipping: {before:,} → {len(full_matrix):,} rows"
+            "Deployment clipping: %s → %s rows",
+            f"{before:,}",
+            f"{len(full_matrix):,}",
         )
 
     return full_matrix
 
 
 def _expected_channels_for_file(
-    wav_path: str, 
+    wav_path: str,
     config: PipelineConfig,
 ) -> list[int]:
     """
@@ -730,7 +739,7 @@ def run_analyses(base_matrix: pd.DataFrame, config: PipelineConfig) -> dict:
         Per-module results: {name → {"outputs", "summary", "warnings"}}.  
     """
     from seasound.analysis.registry import get_analysis
-    
+
     results = {}
     analyses = config.analyses or {}
 
@@ -742,48 +751,47 @@ def run_analyses(base_matrix: pd.DataFrame, config: PipelineConfig) -> dict:
         "cache_dir": cache_dir,
         "input_files": find_audio_files(config),
     }
-    
+
     for name, entry in analyses.items():
         # Skip disabled analyses
         if not isinstance(entry, dict) or not entry.get("enabled", False):
-            logger.debug(f"Skipping disabled analysis: {name}")
+            logger.debug("Skipping disabled analysis: %s", name)
             continue
-        
+
         required = entry.get("required", True)
-        
+
         try:
             # Instantiate and validate module
             module = get_analysis(name)
             module.set_runtime_context(runtime_context)
             module_cfg = entry.get("config", {})
             module.validate_config(module_cfg)
-            
+
             # Run analysis
-            logger.info(f"Running analysis: {name} (required={required})")
+            logger.info("Running analysis: %s (required=%s)", name, required)
             res = module.run(base_matrix, module_cfg, config.output.directory)
-            
+
             results[name] = {
                 "outputs": res.outputs,
                 "summary": res.summary,
                 "warnings": res.warnings,
             }
-            
             # Log warnings if any
             if res.warnings:
                 for warning in res.warnings:
-                    logger.warning(f"  [{name}] {warning}")
-        
-        except Exception as e:
+                    logger.warning("  [%s] %s", name, warning)
+
+        except Exception as e: #pylint: disable=broad-exception-caught
             if required:
-                logger.error(f"Required analysis '{name}' failed: {e}")
+                logger.error("Required analysis '%s' failed: %s", name, e)
                 raise
             else:
-                logger.warning(f"Optional analysis '{name}' failed (continuing): {e}")
+                logger.warning("Optional analysis '%s' failed (continuing): %s", name, e)
                 continue
-    
+
     if not results:
         logger.info("No enabled analyses found in config")
-    
+
     return results
 
 
@@ -828,15 +836,15 @@ def write_manifest(
             "base_resolution_s": config.pipeline.base_resolution_s,
         },
     }
-    
+
     # Add analysis results if present
     if analysis_results:
         manifest["analyses"] = analysis_results
-    
+
     path = os.path.join(output_dir, "run_manifest.json")
-    with open(path, "w") as f:
+    with open(path, "w") as f: #pylint: disable=unspecified-encoding
         json.dump(manifest, f, indent=2)
-    logger.info(f"Manifest written: {path}")
+    logger.info("Manifest written: %s", path)
 
 
 # ---------------------------------------------------------------------------
@@ -906,7 +914,7 @@ def run_plot_mode(
         If given, read the matching `analyses.<kind>.config.plot` block to
         configure the plot. Otherwise built-in defaults are used.
     """
-    import os
+    import os #pylint: disable=redefined-outer-name
     import matplotlib.pyplot as plt
 
     if not os.path.isfile(csv_path):
@@ -920,10 +928,12 @@ def run_plot_mode(
             raw = load_yaml(config_path)
             an = raw.get("analyses", {}).get(kind, {}) or {}
             plot_cfg = (an.get("config", {}) or {}).get("plot", {}) or {}
-        except Exception as exc:
+        except Exception as exc: #pylint: disable=broad-exception-caught
             logger.warning(
-                f"Could not load plot config from {config_path}: {exc}; "
-                f"using defaults."
+                "Could not load plot config from %s: %s; "
+                "using defaults.",
+                config_path,
+                exc
             )
 
     # --- Build plotter and figure ---
@@ -971,7 +981,7 @@ def run_plot_mode(
     dpi = plot_cfg.get("dpi", 300)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
-    logger.info(f"Plot written: {output_path}")
+    logger.info("Plot written: %s", output_path)
 
 def cli_main():
     """CLI entry point (called by the `seasound` command)."""
@@ -1004,7 +1014,7 @@ def cli_main():
     )
     parser.add_argument(
         "--analyse-only", action="store_true",
-        help="Run analysis only (requires existing cache). Useful if running new analyses on previously loaded data."
+        help="Run analysis only (requires existing cache). Useful if running new analyses on previously loaded data." #pylint: disable=line-too-long
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -1053,8 +1063,8 @@ def cli_main():
                 config_path=args.config,
             )
         except SeaSoundError as exc:
-            logger.error(f"\nPlot error: {exc}")
-            raise SystemExit(1)   
+            logger.error("\nPlot error: %s", exc)
+            raise SystemExit(1) from exc
 
     # List analyses if requested
     if args.list_analyses:
@@ -1077,7 +1087,7 @@ def cli_main():
         config = load_config(args.config, overrides)
     except SeaSoundError as exc:
         print(f"\nConfiguration error:\n{exc}")
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
 
     # Apply runtime flags
     config.load_only = args.load_only
@@ -1091,20 +1101,20 @@ def cli_main():
     # Dry run
     if config.dry_run:
         files = find_audio_files(config)
-        print(f"\nDry run:")
+        print(f"\nDry run:") #pylint: disable=f-string-without-interpolation
         print(f"  Config: {args.config}")
         print(f"  Input:  {config.input.path}")
         print(f"  Files:  {len(files)}")
         print(f"  Output: {config.output.directory}")
-        print(f"\nConfig validated successfully.")
+        print(f"\nConfig validated successfully.") #pylint: disable=f-string-without-interpolation
         return
 
     # Run
     try:
         run_pipeline(config)
     except SeaSoundError as exc:
-        logger.error(f"\nPipeline error: {exc}")
-        raise SystemExit(1)
-    except KeyboardInterrupt:
+        logger.error("\nPipeline error: %s", exc)
+        raise SystemExit(1) from exc
+    except KeyboardInterrupt as exc:
         logger.warning("\nInterrupted by user")
-        raise SystemExit(130)
+        raise SystemExit(130) from exc

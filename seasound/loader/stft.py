@@ -16,7 +16,7 @@ def compute_stft_power(
 ):
     """Compute STFT power for a single audio segment."""
     noverlap = win_length - hop_length
-    freqs, times, Zxx = signal.stft(
+    freqs, times, Zxx = signal.stft( #pylint: disable-=invalid-name
         audio_pa,
         fs=sample_rate,
         window=window,

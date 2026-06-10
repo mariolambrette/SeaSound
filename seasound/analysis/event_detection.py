@@ -1,3 +1,4 @@
+#pylint: disable=too-many-lines
 """
 seasound/analysis/event_detection.py
 
