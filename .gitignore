@@ -10,4 +10,6 @@ test_plot2*
 test_threshold_plot*
 .vscode/*
 profile_results/*
-docs/*
+build/
+*.egg-info/
+*.pyc
