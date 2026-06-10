@@ -66,20 +66,10 @@ def test_removed_chunk_duration_gets_tailored_message():
     assert "streaming_block_seconds" in warnings[0]
 
 
-# --- inert-under-streaming keys -------------------------------------------
-
-def test_inert_keys_warn_when_streaming_on():
-    # streaming_enabled defaults to True, so these are inert and warned.
-    raw = {"pipeline": {"stft_cache_enabled": True, "cache_base_matrix": True}}
-    warnings = check_config_keys(raw)
-    joined = " ".join(warnings)
-    assert "pipeline.stft_cache_enabled" in joined
-    assert "pipeline.cache_base_matrix" in joined
-    assert len(warnings) == 2
-
-
-def test_inert_keys_silent_when_streaming_off():
-    # Under the legacy escape hatch these keys are live again — no warning.
+def test_removed_legacy_path_keys_get_tailored_messages():
+    # streaming_enabled / stft_cache_enabled / cache_base_matrix were removed
+    # with the legacy full-read path; each gets a tailored migration message,
+    # not the generic "unknown ... typo" line.
     raw = {
         "pipeline": {
             "streaming_enabled": False,
@@ -87,7 +77,16 @@ def test_inert_keys_silent_when_streaming_off():
             "cache_base_matrix": True,
         }
     }
-    assert check_config_keys(raw) == []
+    warnings = check_config_keys(raw)
+    joined = " ".join(warnings)
+    assert len(warnings) == 3
+    for key in (
+        "pipeline.streaming_enabled",
+        "pipeline.stft_cache_enabled",
+        "pipeline.cache_base_matrix",
+    ):
+        assert key in joined
+    assert "Unknown" not in joined
 
 
 # --- dict-leaf sections must not be walked --------------------------------

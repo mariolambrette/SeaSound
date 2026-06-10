@@ -508,11 +508,11 @@ class AudioBlockReader:
         (always fewer than bin_samples), or None when the usable length
         divides evenly into bins.
 
-        The base-matrix path must never consume these — the legacy
-        compute_base_matrix drops the partial bin — but the legacy STFT
-        path (read_audio → compute_stft_power) consumed the full
-        trimmed file, so the streamed STFT producer reads the tail to
-        stay frame-for-frame identical (refactor plan §9 test 3).
+        The base-matrix path must never consume these — it drops the
+        partial bin (whole-bin resolution) — but the STFT must see the
+        full trimmed file, so the streamed STFT producer reads the tail
+        to stay frame-for-frame identical to a single whole-file STFT
+        (refactor plan §9 test 3).
 
         Seeks explicitly, so the result does not depend on whether
         blocks() has run or how far it was consumed.

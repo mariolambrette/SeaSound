@@ -48,7 +48,6 @@ tests/test_analysis_modules.py
 tests/test_band_threshold_diagnostics.py
 tests/test_base_matrix.py
 tests/test_build_stft_matrix.py
-tests/test_calculate_stft.py
 tests/test_calibration.py
 tests/test_characterisation.py
 tests/test_configs.py

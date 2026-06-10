@@ -30,10 +30,9 @@ from seasound.loader.reader import (
     AudioSegment,
     extract_channel_block,
     probe_output_channels,
-    read_audio,
 )
 from seasound.loader.calibration import load_calibration, resolve_calibration
-from seasound.loader.base_matrix import BaseMatrixAccumulator, compute_base_matrix
+from seasound.loader.base_matrix import BaseMatrixAccumulator
 from seasound.loader.cache import ( #pylint: disable=unused-import
     is_cached,
     base_matrix_cache_path,
@@ -51,7 +50,6 @@ from seasound.loader.stft import StftAccumulator
 from seasound.loader import stft_store
 from seasound.loader.stft_store import StftShardWriter
 
-from seasound.analysis.calculate_stft import get_stft_for_file
 from seasound.core.substrates import (
     BASE_MATRIX,
     STFT,
@@ -216,94 +214,32 @@ def _process_one_file(
     resolved: Optional[set[str]] = None,
 ) -> list[SegmentArtifact]:
     """
-    Process a single WAV file: read → calibrate → compute matrix.
+    Process a single WAV file: stream → calibrate → produce.
 
-    Cache writes are optional side effects.
-    Returns in-memory artifacts regardless of cache mode.
-
-    With pipeline.streaming_enabled the file is streamed in whole-bin
-    blocks (bit-identical output, per-worker memory bounded by one
-    block); otherwise the legacy full-read path runs. The legacy path
-    and this flag are removed together at refactor Stage 6.
+    The file is streamed in whole-bin blocks (bit-identical output,
+    per-worker memory bounded by one block, independent of file
+    duration). Cache writes are side effects of producing; in-memory
+    artifacts are returned regardless.
 
     ``resolved`` is this run's resolved producer set (§7); when omitted
     it is computed from ``config`` so direct callers need not supply it.
-    The streaming path produces only ``resolved`` minus this file's
-    already-cached products (per-file subtraction, resume-aware); the
-    legacy path is unchanged and still keyed off the old flags.
+    Only ``resolved`` minus this file's already-cached products is
+    produced (per-file subtraction, resume-aware).
     """
     if resolved is None:
         resolved = resolve_producers(config)
 
-    # Optional STFT cache generation, legacy full-file npz path only.
-    # The streaming path produces STFT shards inside its block loop
-    # instead (refactor Stage 3): no full-file pre-step, no npz, and
-    # the per-worker peak is bounded by one block. The legacy path and
-    # this flag are removed together at Stage 6.
-    if config.pipeline.stft_cache_enabled and not config.pipeline.streaming_enabled:
-        try:
-            get_stft_for_file(wav_path, config, cache_dir)
-        except Exception as exc:
-            logger.error("STFT caching failed for %s: %s", wav_path, exc)
-            raise
-
-    if config.pipeline.streaming_enabled:
-        # Produce only what's missing for this file. With resume off,
-        # reproduce the whole resolved set (overwriting any cache).
-        if config.pipeline.resume:
-            to_produce = subtract_cached(
-                resolved, _cached_products(wav_path, config, cache_dir)
-            )
-        else:
-            to_produce = set(resolved)
-        return _process_one_file_streaming(
-            wav_path, config, cal_df, cache_dir, to_produce, parser
+    # Produce only what's missing for this file. With resume off,
+    # reproduce the whole resolved set (overwriting any cache).
+    if config.pipeline.resume:
+        to_produce = subtract_cached(
+            resolved, _cached_products(wav_path, config, cache_dir)
         )
-
-    segments = read_audio(wav_path, config.input, parser=parser)
-    artifacts: list[SegmentArtifact] = []
-
-    for segment in segments:
-        # Resolve once per segment; calibrate in place (no second
-        # full-length copy). segment.data is not reused after this point.
-        resolved = resolve_calibration(segment, cal_df, config.calibration)
-        audio_pa = resolved.apply_inplace(segment.data)
-        calibrated = resolved.calibrated
-        matrix = compute_base_matrix(audio_pa, segment.sample_rate, config.pipeline)
-
-        # Keep Stage 1 in-memory artifacts aligned with cached representation:
-        # analysis modules require DatetimeIndex for temporal resampling.
-        if (
-            segment.datetime_start is not None
-            and not isinstance(matrix.index, pd.DatetimeIndex)
-        ):
-            dt_index = pd.date_range(
-                start=segment.datetime_start,
-                periods=len(matrix),
-                freq="1s",
-            )
-            matrix = matrix.copy()
-            matrix.index = dt_index
-            matrix.index.name = "datetime"
-
-        cache_paths: list[str] = []
-        if config.pipeline.cache_base_matrix:
-            path = save_base_matrix(matrix, segment, calibrated, cache_dir)
-            cache_paths.append(path)
-
-        artifacts.append(
-            SegmentArtifact(
-                source_file=segment.source_file,
-                channel=segment.channel,
-                serial=segment.serial,
-                datetime_start=segment.datetime_start,
-                calibrated=calibrated,
-                base_matrix=matrix,
-                cache_paths=cache_paths,
-            )
-        )
-
-    return artifacts
+    else:
+        to_produce = set(resolved)
+    return _process_one_file_streaming(
+        wav_path, config, cal_df, cache_dir, to_produce, parser
+    )
 
 
 def _process_one_file_streaming(
@@ -434,11 +370,10 @@ def _process_one_file_streaming(
                     _stft_push(ch, block_pa)
 
         if stft_enabled:
-            # Legacy parity (§9 test 3): the legacy STFT consumed the
-            # file's fractional tail — the samples past the last whole
-            # bin, which the whole-bin blocks exclude. Feed it to the
-            # STFT producers only; the base matrix drops it, exactly
-            # as the legacy compute_base_matrix did.
+            # The STFT must see the file's fractional tail — the samples
+            # past the last whole bin, which the whole-bin blocks
+            # exclude (§9 test 3). Feed it to the STFT producers only;
+            # the base matrix drops it, by whole-bin construction.
             tail = reader.read_tail()
             if tail is not None:
                 for ch in reader.channels:
@@ -481,11 +416,9 @@ def _process_one_file_streaming(
             if produce_base:
                 # Producing the base matrix means caching it — the
                 # resolver and resume rule treat the parquet as the
-                # base-matrix product (the legacy cache_base_matrix
-                # gate no longer applies on the streaming path).
-                # save_base_matrix consumes segment *metadata* only; the
-                # streaming path has no sample array, so it passes an
-                # empty placeholder.
+                # base-matrix product. save_base_matrix consumes segment
+                # *metadata* only; the streaming path has no sample
+                # array, so it passes an empty placeholder.
                 meta_segment = AudioSegment(
                     data=np.empty(0, dtype=np.float32),
                     sample_rate=reader.sample_rate,
@@ -683,7 +616,7 @@ def run_loading(config: PipelineConfig) -> pd.DataFrame:
     # of truth — rather than worker-returned rows, so the manifest
     # always covers every complete shard on disk, including those
     # produced by earlier (resumed) runs.
-    if config.pipeline.streaming_enabled and STFT in resolved:
+    if STFT in resolved:
         stft_dir = stft_store.stft_dir_for(cache_dir)
         shard_rows = stft_store.rebuild_manifest_rows(stft_dir)
         if shard_rows:
@@ -743,8 +676,8 @@ def _cached_products(
 
     A product counts as cached only when present for **every** expected
     output channel: base matrix → per-channel parquet; STFT → per-channel
-    complete shard (streaming) or per-channel npz (legacy path). Used by
-    both the resume rule and the per-file producer subtraction.
+    complete shard. Used by both the resume rule and the per-file
+    producer subtraction.
     """
     channels = _expected_channels_for_file(wav_path, config)
     cached: set[str] = set()
@@ -754,19 +687,11 @@ def _cached_products(
     if all(is_cached(wav_path, ch, cache_dir) for ch in channels):
         cached.add(BASE_MATRIX)
 
-    if config.pipeline.streaming_enabled:
-        stft_dir = stft_store.stft_dir_for(cache_dir)
-        if all(
-            stft_store.shard_complete(stft_dir, wav_path, ch) for ch in channels
-        ):
-            cached.add(STFT)
-    else:
-        base = os.path.splitext(os.path.basename(wav_path))[0]
-        if all(
-            os.path.isfile(os.path.join(cache_dir, f"{base}_ch{ch}_stft.npz"))
-            for ch in channels
-        ):
-            cached.add(STFT)
+    stft_dir = stft_store.stft_dir_for(cache_dir)
+    if all(
+        stft_store.shard_complete(stft_dir, wav_path, ch) for ch in channels
+    ):
+        cached.add(STFT)
 
     return cached
 

@@ -137,19 +137,13 @@ class ProcessingConfig:
     # across runs and deployments (both alter the numerics).
     nfft_padding_factor: int = 4   # JOMOPANS 4x zero-padding
     sxx_dtype: str = "float32"     # "float32" | "float64"
-    cache_base_matrix: bool = True
     cache_directory: Optional[str] = None
 
-    # Streaming Stage-1 path (refactor plan Stage 2). Default since the
-    # Stage 2 gates passed on synthetic and real data: whole-bin block
-    # streaming, bit-identical to the legacy path with bounded per-worker
-    # memory. Set False to fall back to the legacy full-read path (escape
-    # hatch only; both the flag and the legacy path are removed at Stage 6).
-    streaming_enabled: bool = True
+    # Streaming Stage-1 path (refactor plan Stage 2): whole-bin block
+    # streaming, per-worker memory bounded by one block.
     streaming_block_seconds: int = 60
 
     # Optional linear STFT support
-    stft_cache_enabled: bool = False
     stft_nfft: int = 2048
     stft_win_length: int = 2048
     stft_hop_length: int = 1024
@@ -168,8 +162,8 @@ class ProcessingConfig:
     # True = force the producer on even when no analysis needs it;
     # False = force it off, in which case an enabled analysis that
     # needs it is skipped with a warning (warn-and-skip). These are the
-    # resolver's force levers; Stage 5b wires them into the loop and
-    # supersedes the legacy stft_cache_enabled / cache_base_matrix gates.
+    # resolver's force levers, wired into the producer-resolution loop
+    # (Stage 5b); they are the sole gate on what each file produces.
     # The base matrix is the foundational Stage-1 product (returned and
     # clipped by run_loading, and produced even by --load-only with no
     # analyses), so it defaults force-on; STFT is left resolver-decided.
@@ -248,7 +242,7 @@ def merge_cli(base: dict, overrides: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Config-key hygiene (warn on unknown / removed / inert keys)
+# Config-key hygiene (warn on unknown / removed keys)
 # ---------------------------------------------------------------------------
 
 # Keys that once existed (or were proposed) but are no longer read. Mapped to
@@ -258,13 +252,19 @@ _REMOVED_KEYS = {
         "is no longer used: under the streaming path each block is the chunk "
         "(see pipeline.streaming_block_seconds)."
     ),
+    "pipeline.streaming_enabled": (
+        "is no longer used: streaming is now the only Stage-1 path "
+        "(the legacy full-read path was removed)."
+    ),
+    "pipeline.stft_cache_enabled": (
+        "is no longer used: the streaming path writes STFT shards to the "
+        "STFT store (the legacy npz cache was removed)."
+    ),
+    "pipeline.cache_base_matrix": (
+        "is no longer used: the streaming path always caches the base matrix "
+        "(the resolver and resume rule treat the parquet as the product)."
+    ),
 }
-
-# Keys still read by the legacy full-read path but inert once streaming is
-# enabled (the default). Warned only when streaming is on, since they remain
-# meaningful with streaming_enabled: false. streaming_enabled itself joins
-# this set when the legacy path is removed (refactor Stage 6).
-_INERT_UNDER_STREAMING = ("stft_cache_enabled", "cache_base_matrix")
 
 
 def _schema_keys(cls, prefix: str = ""):
@@ -300,13 +300,12 @@ def _iter_present_keys(raw: dict, sections: set, prefix: str = ""):
 
 
 def check_config_keys(raw: dict) -> list[str]:
-    """Human-readable warnings for unknown, removed, or inert config keys.
+    """Human-readable warnings for unknown or removed config keys.
 
     Pure: logs nothing and raises nothing (mirrors substrates.validate_*),
     so the caller controls logging and it stays unit-testable. Unknown keys
     are silently dropped by _build_dataclass; this surfaces them before they
-    cause confusion, and warns about keys that are inert under the streaming
-    path before Stage 6 removes them.
+    cause confusion, and gives removed keys a tailored migration message.
     """
     valid, sections = _schema_keys(PipelineConfig)
     present = set(_iter_present_keys(raw, sections))
@@ -320,18 +319,6 @@ def check_config_keys(raw: dict) -> list[str]:
             warnings.append(
                 f"Unknown config key '{dotted}' — ignored. Check for a typo."
             )
-
-    # Inert-under-streaming keys (only when streaming is actually on).
-    pipe = raw.get("pipeline", {}) or {}
-    streaming_on = pipe.get("streaming_enabled", True)
-    if streaming_on:
-        for name in _INERT_UNDER_STREAMING:
-            if name in pipe:
-                warnings.append(
-                    f"Config key 'pipeline.{name}' has no effect while "
-                    f"streaming is enabled (the default) and will be removed "
-                    f"in a future release."
-                )
 
     return warnings
 

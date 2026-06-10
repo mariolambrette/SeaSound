@@ -20,7 +20,7 @@ import pytest
 
 from seasound.core.config import CalibrationConfig, ProcessingConfig
 from seasound.core.exceptions import CalibrationError
-from seasound.loader.base_matrix import compute_base_matrix
+from tests.golden import base_matrix_from_array
 from seasound.loader.calibration import ( #pylint: disable=unused-import
     ResolvedCalibration,
     apply_calibration,
@@ -295,16 +295,16 @@ class TestBaseMatrixConfigPromotions:
         default_cfg = ProcessingConfig()
         explicit_cfg = ProcessingConfig(nfft_padding_factor=4, sxx_dtype="float32")
 
-        a = compute_base_matrix(audio, sr, default_cfg)
-        b = compute_base_matrix(audio, sr, explicit_cfg)
+        a = base_matrix_from_array(audio, sr, default_cfg)
+        b = base_matrix_from_array(audio, sr, explicit_cfg)
         np.testing.assert_array_equal(a.to_numpy(), b.to_numpy())
 
     def test_padding_factor_changes_numerics(self):
         """Sanity: the knob is live — a different factor must change
         values (this is why it is documented DO NOT CHANGE)."""
         audio, sr = self._audio()
-        a = compute_base_matrix(audio, sr, ProcessingConfig())
-        b = compute_base_matrix(
+        a = base_matrix_from_array(audio, sr, ProcessingConfig())
+        b = base_matrix_from_array(
             audio, sr, ProcessingConfig(nfft_padding_factor=2)
         )
         mask = ~np.isnan(a.to_numpy())
@@ -314,8 +314,8 @@ class TestBaseMatrixConfigPromotions:
         """Sanity: the knob is live — a different dtype must change
         values (this is why it is documented DO NOT CHANGE)."""
         audio, sr = self._audio()
-        a = compute_base_matrix(audio, sr, ProcessingConfig())
-        b = compute_base_matrix(audio, sr, ProcessingConfig(sxx_dtype="float64"))
+        a = base_matrix_from_array(audio, sr, ProcessingConfig())
+        b = base_matrix_from_array(audio, sr, ProcessingConfig(sxx_dtype="float64"))
         assert a.shape == b.shape
         mask = ~np.isnan(a.to_numpy())
         assert not np.array_equal(a.to_numpy()[mask], b.to_numpy()[mask])

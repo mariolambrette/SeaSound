@@ -18,7 +18,6 @@ instead of re-processing WAV files for minutes/hours.
 
 import os
 import logging
-import tempfile
 from datetime import datetime #pylint: disable=unused-import
 
 import numpy as np
@@ -74,7 +73,7 @@ def save_base_matrix(
     Parameters
     ----------
     matrix : pd.DataFrame
-        Base matrix from compute_base_matrix(). Index is integer seconds.
+        Base matrix from the base-matrix accumulator.
     segment : AudioSegment
         Source segment (provides serial, datetime, channel, filepath).
     calibrated : bool
@@ -223,55 +222,3 @@ def load_cached_for_sources(
     out = pd.concat(frames).sort_index()
     out = out[~out.index.duplicated(keep="first")]
     return out
-
-
-def save_stft_npz(
-    freqs_hz,
-    times_s,
-    power,
-    segment: AudioSegment,
-    cache_dir: str,
-) -> str:
-    """Save STFT power to NPZ with metadata in the filename."""
-    os.makedirs(cache_dir, exist_ok=True)
-    base = os.path.splitext(os.path.basename(segment.source_file))[0]
-    fname = f"{base}_ch{segment.channel}_stft.npz"
-    path = os.path.join(cache_dir, fname)
-
-    tmp_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            delete=False,
-            dir=cache_dir,
-            suffix=".npz",
-        ) as tmp_file:
-            tmp_path = tmp_file.name
-            np.savez_compressed(
-                tmp_file,
-                freqs_hz=freqs_hz,
-                times_s=times_s,
-                power=power,
-                serial=segment.serial, # pyright: ignore[reportArgumentType]
-                sample_rate=segment.sample_rate,
-                source_file=os.path.basename(segment.source_file),
-                datetime_start=(
-                    segment.datetime_start.isoformat() if segment.datetime_start else "unknown"
-                ),
-            )
-
-        # Atomic replace to avoid readers observing partial zip content.
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path is not None and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-    return path
-
-
-def load_stft_npz(path: str):
-    """Load STFT power from NPZ saved by save_stft_npz()."""
-    return np.load(path, allow_pickle=False)

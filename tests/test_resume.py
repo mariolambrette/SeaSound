@@ -34,7 +34,6 @@ from seasound.loader.reader import probe_output_channels
 
 def _streaming_stft_cfg(test_config):
     cfg = copy.deepcopy(test_config)
-    cfg.pipeline.streaming_enabled = True
     cfg.pipeline.stft_enabled = True  # resolver force-on → resolved = {base, stft}
     return cfg
 

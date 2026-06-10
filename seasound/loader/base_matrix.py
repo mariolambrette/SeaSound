@@ -21,15 +21,13 @@ more finely. This means that narrow TOB bands at low frequencies
 (e.g. the 10 Hz band spans only ~2 Hz) get more FFT bins falling
 inside them, producing smoother and more stable estimates.
 
-Two entry points share one numerical kernel (_band_levels):
+The base matrix is produced by streaming (_band_levels is the numerical
+kernel):
 
-- compute_base_matrix(): legacy whole-array API (read everything,
-  process in 300 s chunks). Kept live as the golden reference during
-  the streaming transition; removed at Stage 6.
-- BaseMatrixAccumulator: streaming API. push() whole-bin blocks as
-  they are read, finalise() to assemble the same DataFrame. Because
-  noverlap=0 over independent 1-second bins, per-block output is
-  bit-identical to per-chunk output (refactor plan D4; gated by the
+- BaseMatrixAccumulator: push() whole-bin blocks as they are read,
+  finalise() to assemble the DataFrame. Because noverlap=0 over
+  independent 1-second bins, per-block output is bit-identical to
+  processing the whole array at once (refactor plan D4; gated by the
   streaming identity tests).
 """
 
@@ -209,132 +207,13 @@ def _assemble_frame(
 
 
 # ---------------------------------------------------------------------------
-# Legacy whole-array API (golden reference; removed at Stage 6)
-# ---------------------------------------------------------------------------
-
-
-def compute_base_matrix(
-    audio_pa: np.ndarray,
-    sample_rate: int,
-    config: ProcessingConfig,
-) -> pd.DataFrame:
-    """
-    Compute 1-second resolution TOB SPL matrix (JOMOPANS standard).
-
-    Parameters
-    ----------
-    audio_pa : np.ndarray
-        Calibrated audio in Pascals. 1-D array (mono).
-    sample_rate : int
-        Sample rate in Hz.
-    config : ProcessingConfig
-        Processing parameters (max_freq_hz, min_freq_hz,
-        base_resolution_s, reference_pressure_pa, missing_band_strategy).
-
-    Returns
-    -------
-    pd.DataFrame
-        Index: integer seconds (0, 1, 2, ...)
-        Columns: TOB centre frequency strings like '63.0Hz'
-        Values: SPL in dB re config.reference_pressure_pa
-
-    Notes
-    -----
-    Memory management: for long files (hours of audio at 96 kHz+), are
-    processed in chunks of 300 seconds (5 minutes) to avoid holding the
-    full spectrogram in memory. Each chunk processes independently
-    and results are written into a pre-allocated output array.
-
-    The streaming pipeline does not use this function; it pushes blocks
-    into a BaseMatrixAccumulator instead. Both share _band_levels, so
-    their numerics are identical by construction.
-    """
-    resolution_s = config.base_resolution_s
-    ref_pressure = config.reference_pressure_pa
-
-    # --- Determine which TOB bands are reachable ---
-    all_centres, reachable_centres, reachable_edges = _band_setup(
-        sample_rate, config
-    )
-
-    # --- Segment audio into time bins ---
-    bin_samples = int(resolution_s * sample_rate)
-    n_bins = len(audio_pa) // bin_samples
-
-    if n_bins == 0:
-        logger.warning(
-            "Audio shorter than %ss — cannot compute base matrix",
-            resolution_s
-        )
-        return pd.DataFrame(columns=freq_column_names(all_centres))
-
-    # Trim to exact number of bins
-    audio_trimmed = audio_pa[: n_bins * bin_samples]
-
-    # --- FFT parameters ---
-    nperseg = bin_samples
-    # 4x zero-padding per JOMOPANS at the default. DO NOT CHANGE
-    # nfft_padding_factor if outputs must stay comparable across
-    # runs/deployments — it alters the numerics of every band estimate.
-    nfft = config.nfft_padding_factor * nperseg
-
-    # Spectrogram compute dtype, controlled by casting the input block.
-    # "float32" matches the float32 golden baseline. DO NOT CHANGE if
-    # outputs must stay comparable — float64 alters the last bits.
-    sxx_np_dtype = np.float64 if config.sxx_dtype == "float64" else np.float32
-
-    # --- Chunked processing for memory efficiency ---
-    chunk_duration_s = 300  # 5 minutes
-    bins_per_chunk = max(1, chunk_duration_s // resolution_s)
-    n_chunks = int(np.ceil(n_bins / bins_per_chunk))
-
-    # Pre-allocate output: (n_reachable_bands, n_bins)
-    ltsa = np.full((len(reachable_centres), n_bins), np.nan)
-
-    logger.info(
-        "Computing base matrix: %s × %ss bins, %s TOB bands, %s chunk(s)",
-        n_bins,
-        resolution_s,
-        len(reachable_centres),
-        n_chunks,
-    )
-
-    for chunk_idx in range(n_chunks):
-        bin_start = chunk_idx * bins_per_chunk
-        bin_end = min(bin_start + bins_per_chunk, n_bins)
-
-        # Slice audio for this chunk
-        sample_start = bin_start * bin_samples
-        sample_end = bin_end * bin_samples
-        # np.asarray is copy-free when the dtype already matches, so the
-        # float32 default is bit-identical to the pre-config behaviour.
-        audio_chunk = np.asarray(
-            audio_trimmed[sample_start:sample_end], dtype=sxx_np_dtype
-        )
-
-        ltsa[:, bin_start:bin_end] = _band_levels(
-            audio_chunk,
-            sample_rate,
-            nperseg,
-            nfft,
-            reachable_edges,
-            ref_pressure,
-        )
-
-    return _assemble_frame(
-        ltsa, n_bins, all_centres, reachable_centres,
-        config.missing_band_strategy,
-    )
-
-
-# ---------------------------------------------------------------------------
 # Streaming API
 # ---------------------------------------------------------------------------
 
 
 class BaseMatrixAccumulator:
     """
-    Streaming counterpart of compute_base_matrix.
+    Streaming base-matrix builder over whole-bin blocks.
 
     Construct once per file/channel with the total bin count (known
     up front from the file header), push() calibrated whole-bin blocks

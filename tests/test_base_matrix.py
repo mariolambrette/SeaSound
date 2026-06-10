@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from seasound.loader.base_matrix import compute_base_matrix
+from tests.golden import base_matrix_from_array
 from seasound.core.config import ProcessingConfig
 
 
@@ -32,7 +32,7 @@ class TestBaseMatrix:
             missing_band_strategy="nan",
         )
 
-        matrix = compute_base_matrix(audio_pa, sr, config)
+        matrix = base_matrix_from_array(audio_pa, sr, config)
 
         # Expected SPL for 1 Pa RMS: 20*log10(1 / 1e-6) = 120 dB
         # The actual value will be slightly less because the band only
@@ -64,7 +64,7 @@ class TestBaseMatrix:
             base_resolution_s=1, reference_pressure_pa=1e-6,
         )
 
-        matrix = compute_base_matrix(audio, sr, config)
+        matrix = base_matrix_from_array(audio, sr, config)
         assert len(matrix) == 5
         assert "1000.0Hz" in matrix.columns
 
@@ -78,5 +78,5 @@ class TestBaseMatrix:
             base_resolution_s=1, reference_pressure_pa=1e-6,
         )
 
-        matrix = compute_base_matrix(audio, sr, config)
+        matrix = base_matrix_from_array(audio, sr, config)
         assert len(matrix) == 0

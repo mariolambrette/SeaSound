@@ -23,7 +23,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from seasound.core.config import PipelineConfig
+from seasound.core.config import PipelineConfig, ProcessingConfig
 from seasound.loader.calibration import load_calibration
 
 
@@ -116,6 +116,30 @@ def streamed_stft_entries(
                 "power": power,
             })
     return entries
+
+
+def base_matrix_from_array(
+    audio_pa: np.ndarray,
+    sample_rate: int,
+    config: ProcessingConfig,
+) -> pd.DataFrame:
+    """
+    Whole-array base matrix via the streaming accumulator — the only
+    base-matrix API after the Stage-6 cleanup. Pushes the whole signal
+    as a single block and finalises (integer-second index, no datetime),
+    so DSP-correctness and numeric-knob tests that hold a raw Pascal
+    array can assert against it directly. Because noverlap=0 over
+    independent 1-second bins, one push is bit-identical to per-block
+    streaming.
+    """
+    from seasound.loader.base_matrix import BaseMatrixAccumulator
+
+    bin_samples = int(config.base_resolution_s * sample_rate)
+    n_bins = len(audio_pa) // bin_samples if bin_samples else 0
+    acc = BaseMatrixAccumulator(sample_rate, n_bins, config)
+    if n_bins > 0:
+        acc.push(np.asarray(audio_pa)[: n_bins * bin_samples])
+    return acc.finalise()
 
 
 # ---------------------------------------------------------------------------
