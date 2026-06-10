@@ -2,9 +2,11 @@
 # SeaSound Pipeline Default Configuration
 # ===========================================================================
 #
-# This YAML file defines all configurable parameters in the SeaSound pipeline.
-# Users should consider it a user-guide to the pipeline options. It can be
-# copied and modified to create configurations for specific projects.
+# This file documents every configurable parameter in the SeaSound pipeline
+# and supplies sensible defaults. Treat it as the user guide: copy it, point
+# the input path and calibration at your data, and override only what you
+# need. Every key below is annotated with what it does and its accepted
+# values.
 #
 # Usage:
 #   seasound --config config/default.yaml --input ./raw_wav/
@@ -16,8 +18,9 @@
 # Input Options
 # -----------------------------------------------------------------------------
 input:
-  # Path to directory containing audio files
-  path: "./data/raw/"
+  # Path to the directory containing audio files. Override on the command
+  # line with --input. (Example placeholder; point this at your data.)
+  path: "./raw_wav/"
 
   # Glob pattern for matching audio files within the directory
   pattern: "*.wav"
@@ -34,14 +37,19 @@ input:
   filename_format: "soundtrap"
 
   # Only used when filename_format is "custom":
-  # custom_regex: "(?P<serial>\\d+)\\.(?P<datetime>\\d{12})\\.wav"
-  # custom_datetime_format: "%y%m%d%H%M%S"
+  custom_regex: "(?P<serial>[A-Za-z]+)_[A-Za-z]+_(?P<datetime>\\d{8}_\\d{6})_\\d+\\.wav"
+  custom_datetime_format: "%Y%m%d_%H%M%S"
 
   # Only used when filename_format is "manual":
-  # serial_override overrides the serial extracted from the filename (any format):
   # serial_override: "9471"
-  # start_datetime is only used when filename_format is "manual":
   # start_datetime: "2025-10-11 12:00:00"
+
+  # Discard N seconds from the start of every recording before any
+  # downstream processing. Removes recorder spin-up artefacts
+  # (DC settling, AGC ramp, mechanical start-up noise). The trim is
+  # applied at the audio-read step, so both the base matrix and the
+  # STFT see the trimmed audio consistently. Set to 0 to disable.
+  per_file_trim_start_s: 3.0
 
 # -----------------------------------------------------------------------------
 # Calibration
@@ -55,20 +63,23 @@ calibration:
   # When false, uncalibrated data is processed with a warning.
   strict: true
 
+  # Path to calibration spreadsheet (Excel .xlsx). Required unless you
+  # set sensitivity_db_override below.
+  file: ""
+
   # Optional: provide a single sensitivity value (dB) directly.
   # When set, the calibration file is not required and the serial number
   # is not used for lookup. Applies the same conversion method as above.
-  # Example: sensitivity_db_override: -176.0
-
-  # Path to calibration spreadsheet (Excel .xlsx)
-  file: "./data/SoundTrapCalibration.xlsx"
+  # Useful when you know your hydrophone's sensitivity value but do not
+  # have a calibration spreadsheet.
+  # sensitivity_db_override: 176.5
 
   # The column name containing the hydrophone serial numbers
-  serial_column: "Serial"
+  serial_column: ""
 
   # Column name in the spreadsheet containing sensitivity values.
   # The spreadsheet must also have a column parseable as serial number.
-  sensitivity_column: "High_Gain"
+  sensitivity_column: ""
 
   # Calibration method — determines how sensitivity values are interpreted:
   #   "soundtrap"  — SoundTrap end-to-end: samples × 10^(cal/20) = µPa
@@ -91,11 +102,11 @@ calibration:
 #
 deployment:
   enabled: false
-  
-  # Specify the method for clipping deployment recordings. If "none", no
-  # clipping is applied. "manaual" uses the start_utc and end_utc parameters .
-  # "metadata" reads start and end times from a metadata spreadsheet using the
-  # specified metdata reading function (metadata_format parameter below).
+
+  # Method for clipping deployment recordings. If "none", no clipping is
+  # applied. "manual" uses the start_utc and end_utc parameters. "metadata"
+  # reads start and end times from a metadata spreadsheet using the
+  # specified metadata reading function (metadata_format parameter below).
   clip_method: "none"
 
   # --- manual method: explicit datetime bounds (YYYY-MM-DD HH:MM:SS utc) ---
@@ -105,21 +116,19 @@ deployment:
   # --- Buffer data ---
   # Following clipping (or if clipping is disabled) a fixed buffer can be
   # applied to the start and end of the recording. Specify the HOURS of data
-  # to trim from the start and enf of the deployment below
+  # to trim from the start and end of the deployment below.
   buffer_hours:
     start: 0.0 # Remove from start of the recording (hours)
     end: 0.0 # Remove from end of the recording (hours)
 
-  # TODO: Add seconds buffer
-
   # --- metadata method ---
   metadata_file: ""
   metadata_format: "seasound"      # "seasound" (CSV) or "excel" (custom columns)
-  location_id: "11"
-  hydrophone: "1111"
+  location_id: ""
+  hydrophone: ""
 
   # Only needed when metadata_format is "excel":
-  # Uncooment the lines below and specify the column headers in the metadata
+  # Uncomment the lines below and specify the column headers in the metadata
   # spreadsheet. The combination of location_id and hydrophone should point
   # to a single unique row in the spreadsheet. deploy and retrieve should then
   # point to the column containing deployment start and end times in UTC.
@@ -137,8 +146,7 @@ output:
   directory: "./output/"
 
   # Overwrite existing output files. If false and outputs exist, raises error.
-  overwrite: false
-
+  overwrite: true
   # Output filename template. Available placeholders:
   #   {location_id}, {hydrophone}, {analysis}, {params}, {ext}
   # Falls back to input folder name if deployment config is disabled.
@@ -152,6 +160,13 @@ pipeline:
   # specified output folder.
   resume: true
 
+  # Audio is read and processed one block at a time (in whole seconds), so peak
+  # per-worker memory is bounded by the block length, not the file length.
+  # Larger blocks amortise per-block overhead; smaller blocks cut memory.
+  # Must be a whole multiple of base_resolution_s. The built-in default is 60;
+  # 10 suits short (~5-minute) files.
+  streaming_block_seconds: 10
+
   # Number of parallel workers for data loading.
   #   0    = automatic (CPU count - 2)
   #   1    = single-threaded (useful for debugging)
@@ -160,7 +175,7 @@ pipeline:
 
   # Maximum frequency for TOB analysis (Hz).
   # Bands above this frequency are not computed.
-  max_freq_hz: 50000
+  max_freq_hz: 12000
 
   # Minimum frequency for TOB analysis (Hz).
   min_freq_hz: 10
@@ -183,21 +198,18 @@ pipeline:
   #   "error" — raise an error and stop
   missing_band_strategy: "nan"
 
-  # Persist base matrix to Parquet for re-analysis.
-  # Strongly recommended. Only set false for one-shot processing where
-  # disk space is critically limited.
-  cache_base_matrix: true
+  # The base matrix is always written to Parquet in the cache directory,
+  # enabling resume and fast re-analysis (this is no longer optional).
 
-  # Directory for cached Parquet files.
+  # Directory for cached files (base-matrix Parquet + the STFT shard store).
   # Default: a ".cache/" subdirectory of the output directory.
   # cache_directory: "./output/.cache/"
 
-  # --- Optional LInear STFT parameters ---
-  
-  # Persist computed STFT to .npz cache files for re-use across analysis runs.
-  # false = compute on demand each time (no disk overhead, recommended default)
-  # true  = write/read .npz files in the cache directory
-  stft_cache_enabled: false
+  # --- Linear STFT parameters ---
+  # Used by the spectrogram and annotated-spectrogram analyses. When any
+  # enabled analysis needs the STFT it is computed once during loading and
+  # written as zarr shards in the cache directory's STFT store — there is no
+  # separate on/off toggle and no .npz cache.
 
   # Analysis window size (samples). Controls the time/frequency resolution
   # trade-off: larger = finer frequency resolution, coarser time resolution.
@@ -224,7 +236,7 @@ pipeline:
   # Bins outside [stft_fmin_hz, stft_fmax_hz] are discarded, reducing
   # memory and storage when only a sub-band is needed.
   stft_fmin_hz: 10.0
-  stft_fmax_hz: 50000.0
+  stft_fmax_hz: 12000.0
 
   # Numeric precision for stored/computed STFT power arrays.
   # "float32" — 4 bytes/value, sufficient for most acoustic analysis.
@@ -255,18 +267,52 @@ analyses:
     config:
       # Time resolution for aggregation (pandas offset alias)
       # Examples: "1h" (hourly), "6h" (6-hourly), "1d" (daily)
-      time_resolution: "1h"
-      
+      time_resolution: "10min"
+
       # Statistic for aggregation within each time bin
       # One of: "median", "mean", "max", "min", "std"
       statistic: "median"
-      
+
       # Frequency range to include (Hz). null = all bands.
       # Example: [100, 10000] to include only 100–10 kHz
       freq_range: null
-      
+
       # Output format: always "csv" for Phase 2
       output_format: "csv"
+
+      # ----- Visualisation (optional) ------------------------------------
+      # When enabled, produce PNG/PDF plots alongside the CSV.
+      plot:
+        enabled: true
+
+        # Plot types to generate. Subset of: "heatmap", "band_timeseries".
+        types: ["heatmap"]
+
+        # Heatmap parameters
+        heatmap:
+          # Frequency range in Hz; null = all bands
+          freq_range: null
+          # Colour-scale limits in dB; null = matplotlib auto
+          db_range: null
+          # Matplotlib colormap
+          colormap: "viridis"
+          # Add a thin broadband-SPL panel above the heatmap
+          broadband_strip: true
+          # Render missing time bins as blanks (recommended for duty-cycle)
+          preserve_time_gaps: true
+
+        # Band time series parameters (only used if "band_timeseries" is in
+        # `types`). Each Hz value is snapped to the nearest TOB band.
+        band_timeseries:
+          bands_hz: [125, 1000, 8000]
+          # Y-axis range in dB; null = auto
+          db_range: null
+          preserve_time_gaps: true
+
+        # Output format: "png" or "pdf"
+        output_format: "png"
+        # DPI for PNG/PDF
+        dpi: 300
 
   # =========================================================================
   # TOB Levels: Per-frequency summary statistics
@@ -282,14 +328,14 @@ analyses:
       #   - Standard: "median", "mean", "std", "max", "min"
       #   - Percentiles: "p5", "p25", "p50", "p75", "p95", "p99", etc.
       statistics: ["median", "p5", "p95"]
-      
+
       # Optional: windowed statistics (seconds). null = entire deployment.
       # Example: 3600 for 1-hour windows
       window_s: null
-      
+
       # Frequency range to include (Hz). null = all bands.
       freq_range: null
-      
+
       # Output format: always "csv" for Phase 2
       output_format: "csv"
 
@@ -303,19 +349,41 @@ analyses:
     required: true
     config:
       # Percentiles to compute (0–100)
-      # Examples: [5, 25, 50, 75, 95] for quintiles
       percentiles: [5, 25, 50, 75, 95]
-      
-      # Time window for percentile computation
-      # "full" = entire deployment (single output row)
-      # Or pandas offset alias like "1h", "6h", "1d"
+
+      # Time window: "full" or pandas offset alias ("1h", "6h", "1d")
       window: "full"
-      
+
       # Frequency range to include (Hz). null = all bands.
       freq_range: null
-      
-      # Output format: always "csv" for Phase 2
+
+      # Output format: always "csv"
       output_format: "csv"
+
+      # ----- Visualisation (optional) ------------------------------------
+      plot:
+        enabled: true
+        # Plot types. Subset of: "curves".
+        types: ["curves"]
+
+        curves:
+          # Frequency range in Hz; null = all bands
+          freq_range: null
+          # Y-axis range in dB; null = auto
+          db_range: null
+          # Shade region between two percentiles
+          shaded_band: true
+          # Which percentiles bound the shaded region (must be in
+          # `percentiles` above)
+          shaded_percentiles: [5, 95]
+          # Use a logarithmic frequency axis
+          log_freq: true
+          # For windowed data only: max grid panels. Windows in excess of
+          # this are evenly subsampled across the time range.
+          max_panels: 16
+
+        output_format: "png"
+        dpi: 300
 
   # =========================================================================
   # Spectrogram: Time-frequency visualization
@@ -327,33 +395,33 @@ analyses:
     config:
       # Frequency range to visualize (Hz). null = all bands.
       freq_range: null
-      
+
       # dB scale range for visualization (e.g., [60, 120] dB).
       # null = automatic scaling
-      db_range: [60, 120]
-      
+      db_range: null
+
       # Matplotlib colormap name
       # Common: "viridis", "plasma", "inferno", "magma", "cividis"
       colormap: "viridis"
-      
+
       # Output format: "png" (default), "pdf", or "csv" (raw matrix)
       output_format: "png"
 
       # Optional time chunking for multiple outputs.
       # null = one full-deployment spectrogram
       # Examples: "1h", "6h", "1d"
-      time_chunk: null
+      time_chunk: "600s"
 
       # Target number of time bins for visual spectrogram outputs.
       # null = no visual downsampling; higher values preserve more detail.
-      # This affects PNG/PDF rendering only, not cached STFT .npz files.
-      time_bins: 12000
+      # This affects PNG/PDF rendering only, not the stored STFT shards.
+      time_bins: 24000
 
       # When true, missing seconds are rendered as blank columns.
       # Use true for QA of duty-cycled recording schedules.
       # Use false for compact visual inspection of only recorded data.
       preserve_time_gaps: false
-      
+
       # DPI for PNG/PDF output
       dpi: 300
 
@@ -370,30 +438,67 @@ analyses:
   # Disabled by default; enable when you have a calibrated deployment
   # and have decided which detector(s) make sense for the data.
   event_detection:
-    
-    # Enable event detection, when flase all event detection is disabled. When
-    # true, indivudal detectors can be enabled/disabled in the detectors list 
-    # below.
-    enabled: false
-    
-    # When true, an error in the event detection module will fail the entire
-    # pipeline. when false, it will log an error and continue with other
-    # analyses.
-    required: false
-
+    enabled: true
+    required: true
     config:
       # --- Shared parameters (applied to every detector) ---
 
       # Minimum event duration in seconds. Shorter detections are dropped.
-      min_duration_s: 2
+      min_duration_s: 30
 
       # Maximum gap (s) between flagged seconds before they're treated as
       # separate events. Use a larger value for slowly-fluctuating sources
       # (e.g. ship passes), smaller for sharp transients.
-      merge_gap_s: 15
+      merge_gap_s: 30
 
       # Output format. Only "csv" is supported in this version.
       output_format: "csv"
+
+      # =====================================================================
+      # Annotated spectrogram (cross-detector validation plot)
+      # =====================================================================
+      # Overlays every enabled detector's events on an STFT-derived
+      # spectrogram. Requires STFT data — either enable the `spectrogram`
+      # analysis or have STFT shards already present in the store. If neither
+      # is available, this plot is skipped with a warning and the rest of the
+      # pipeline continues.
+      annotated_spectrogram:
+        enabled: true
+
+        # Which detectors' events to overlay. null = all detectors that ran.
+        include_detectors: null
+
+        # Spectrogram rendering
+        freq_range: null            # Hz; null = full
+        db_range: [30, 200]
+        colormap: "viridis"
+        preserve_time_gaps: false
+
+        # Split the deployment into time chunks; produce one figure per
+        # chunk. Pandas offset alias ("1h", "6h", "1d") or null for one
+        # full-deployment figure. Mirrors the plain spectrogram's
+        # time_chunk knob.
+        time_chunk: "600s"
+
+        # Target number of time bins in the STFT matrix used as the
+        # substrate. Bounds memory for long deployments. null disables.
+        time_bins: 12000
+
+        # Annotation styling: per-detector overrides. Omitting a detector
+        # falls back to sensible built-in defaults (red for band_threshold,
+        # orange for adaptive_threshold_legacy, blue for anomaly). Each
+        # entry is a partial style dict; keys you don't set inherit the
+        # built-in default for that detector.
+        annotation_styles:
+          # band_threshold: {edge_color: "red", line_width: 1.5}
+          # adaptive_threshold_legacy: {edge_color: "orange", alpha: 0.15}
+
+        # Convenience: when true, event_id is drawn at the corner of each
+        # annotation rectangle.
+        annotation_label: true
+
+        output_format: "png"
+        dpi: 300
 
       # --- Detector list (order = order they run; one CSV per detector) ---
       detectors:
@@ -404,20 +509,60 @@ analyses:
         - type: "adaptive_threshold"
 
           # Enable this detector
-          enabled: true
+          enabled: false
 
           # Frequency band for broadband summation (Hz). null = all bands.
-          broadband_freq_range: [100, 50000]
+          broadband_freq_range: [50, 12000]
 
           # Rolling-baseline window length in hours.
           baseline_window_hours: 1
 
           # Percentile of the rolling window used as the baseline value
-          # (e.g. 90 = 90th percentile → top 10% of values above the baseline).
-          baseline_percentile: 90
+          # (e.g. 98 = 98th percentile → robust to events themselves).
+          baseline_percentile: 97
 
           # dB above baseline at which a second is flagged.
-          threshold_db: 2.0
+          threshold_db: 0
+
+        # ----- Per-band threshold detection ----------------------------------
+        # Flags seconds where the sound power level of any individual third
+        # octave band exceeds the given percentile of that band's distribution
+        # over the given window size.
+        - type: "band_threshold"
+
+          # Enable this detector
+          enabled: true
+
+          # The range of sound frequencies to consider given as [MIN, MAX] in Hz
+          # If null, all frequencies are considered.
+          freq_range_hz: [50, 12000]
+
+          # Number of hours to consider for the rolling baseline calculation.
+          # This should be tuned to account for drift in the general soundscape
+          # (e.g. diurnal patterns in noise levels).
+          baseline_window_hours: 1
+
+          #
+          baseline_percentile: 10
+          threshold_percentile: 98
+          min_band_coverage: 0.5
+          min_duration_s: 15
+          merge_gap_s: 10
+
+          # ----- Validation plot (optional) -----------------------------
+          plot:
+            enabled: true
+            types: ["threshold_diagnostic"]
+            threshold_diagnostic:
+              # Bands in Hz; each is snapped to the nearest TOB column.
+              bands_hz: [125, 1000, 8000]
+              # Display downsampling target per panel (max-pool for
+              # value/threshold, mean-pool for baseline). Long deployments
+              # at 1-Hz resolution are unreadable without this.
+              max_points_per_panel: 5000
+            output_format: "png"   # png | pdf
+            dpi: 300
+
 
         # ----- PCA anomaly detector ------------------------------------------
         # Flags seconds whose spectrum is unusual relative to the
@@ -425,7 +570,7 @@ analyses:
         - type: "anomaly"
 
           # Enable this detector
-          enabled: true
+          enabled: false
 
           # Algorithm variant. Only "pca" is implemented currently.
           method: "pca"
