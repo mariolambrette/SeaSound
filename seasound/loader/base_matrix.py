@@ -60,7 +60,7 @@ def _band_setup(
 ) -> tuple[np.ndarray, np.ndarray, list]:
     """
     Resolve the TOB band set for this sample rate, applying the
-    missing-band strategy exactly as the legacy path always has.
+    configured missing-band strategy.
 
     Returns
     -------
@@ -105,9 +105,8 @@ def _band_levels(
 ) -> np.ndarray:
     """
     The numerical kernel: TOB band SPL for one whole-bin chunk of
-    calibrated audio. Both the legacy chunk loop and the streaming
-    accumulator call this, so the numerics have a single
-    implementation.
+    calibrated audio. The streaming accumulator is its only caller, so
+    the band numerics have a single implementation.
 
     Parameters
     ----------
@@ -173,7 +172,7 @@ def _assemble_frame(
 ) -> pd.DataFrame:
     """
     Build the output DataFrame from the filled (n_bands, n_bins) array,
-    applying the missing-band strategy exactly as the legacy path.
+    applying the configured missing-band strategy.
     """
     # If max_freq was clipped, we only computed reachable bands.
     # For "nan" strategy, add NaN columns for unreachable bands.

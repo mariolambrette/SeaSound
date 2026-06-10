@@ -44,18 +44,18 @@ class StftAccumulator:
     ``win`` of them — and is prepended to the next block, so no frame
     is ever split, duplicated, or fabricated across a block seam.
     Identity is structural, not re-derived: each batch of frames is
-    produced by the *same* ``compute_stft_power`` call the legacy
-    full-file path uses, on a buffer that always starts exactly at a
-    frame boundary.
+    produced by the *same* ``compute_stft_power`` call a whole-file STFT
+    would use, on a buffer that always starts exactly at a frame
+    boundary.
 
     One accumulator serves exactly one file/channel — the per-file
     carry reset of D8 holds by construction. At ``finalise`` the carry
     (the trailing samples too few to complete a frame) is discarded,
-    matching the legacy path's trailing-remainder drop. A whole file
-    shorter than ``win_length`` therefore yields zero frames; the
-    legacy ``scipy`` call would instead shrink ``nperseg`` with a
-    warning on such degenerate input, which is silently wrong — the
-    streaming path refuses to reproduce that.
+    matching a whole-file STFT's trailing-remainder drop. A whole file
+    shorter than ``win_length`` therefore yields zero frames; a plain
+    ``scipy`` call would instead shrink ``nperseg`` with a warning on
+    such degenerate input, which is silently wrong — the streaming path
+    refuses to reproduce that.
 
     Memory: holds at most ``carry + one block`` of samples plus one
     block's frames — never the file.
@@ -134,8 +134,8 @@ class StftAccumulator:
     def finalise(self) -> int:
         """
         End of file: discard the carry (the trailing samples too few to
-        complete a frame — exactly what the legacy full-file call
-        drops) and return the total frame count.
+        complete a frame — exactly what a whole-file STFT call drops)
+        and return the total frame count.
         """
         if self._finalised:
             raise RuntimeError("finalise() called twice on StftAccumulator")

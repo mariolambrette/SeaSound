@@ -9,7 +9,6 @@ seasound.egg-info/requires.txt
 seasound.egg-info/top_level.txt
 seasound/analysis/__init__.py
 seasound/analysis/base.py
-seasound/analysis/calculate_stft.py
 seasound/analysis/event_detection.py
 seasound/analysis/ltsa.py
 seasound/analysis/registry.py

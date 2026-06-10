@@ -3,16 +3,15 @@ seasound/loader/stft_store.py
 
 Chunked, windowed STFT power store (refactor plan §6, D3, D8).
 
-Replaces the per-file ``.npz`` STFT cache with self-describing zarr
-shards that can be read by datetime window without ever assembling the
-deployment-wide matrix:
+The STFT power store: self-describing zarr shards that can be read by
+datetime window without ever assembling the deployment-wide matrix:
 
 - One shard per file/channel (``<cache_dir>/stft/<basename>_ch<n>.zarr``),
   written by exactly one worker — parallel writes never contend (D3).
 - Shards are internally chunked along the time axis, so a datetime
   window touches only the overlapping chunks (bounded memory).
-- Values are **linear power** (as today's ``.npz``), not dB —
-  dB conversion stays in the consumer, preserving current semantics.
+- Values are **linear power**, not dB — dB conversion stays in the
+  consumer, preserving current semantics.
 - Every shard stores its full metadata in its own attributes, plus a
   ``complete: true`` attribute written as the **last** metadata act of
   ``finalise()``. A shard without the flag is a crash artifact and is
@@ -28,8 +27,8 @@ Frame timestamps follow the window-centre convention (D8): frame *k*
     file_datetime_start + (win_length/2 + k * hop_length) / sample_rate
 
 computed in float64 exactly as ``scipy.signal.stft`` returns
-``times_s``, so store datetimes equal the legacy
-``datetime_start + times_s`` to the nanosecond after pandas conversion.
+so store datetimes equal ``datetime_start + times_s`` to
+the nanosecond after pandas conversion.
 
 The manifest layout is deliberately inside the ``stft/`` subdirectory:
 ``cache.load_all_cached`` globs ``<cache_dir>/*.parquet`` non-recursively

@@ -355,8 +355,8 @@ class AudioBlockReader:
     n_channels : int
     n_bins : int
         Whole bins the file will produce after the start trim
-        (trailing partial bin dropped at end-of-file, exactly as the
-        legacy path trims to n_bins * bin_samples).
+        (trailing partial bin dropped at end-of-file; the base matrix
+        uses exactly n_bins * bin_samples samples).
     channels : list[int]
         Output channel IDs under the configured strategy.
     serial : str or None
