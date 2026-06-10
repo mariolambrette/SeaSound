@@ -9,4 +9,7 @@ adaptive_threshold_diagnostic*
 test_plot2*
 test_threshold_plot*
 .vscode/*
-profile_*
+profile_results/*
+build/
+*.egg-info/
+*.pyc

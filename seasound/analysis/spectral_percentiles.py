@@ -154,8 +154,8 @@ class SpectralPercentilesAnalysis(AnalysisModule):
 
             # Force percentiles to integers
             percentile_labels = [
-                str(int(p)) 
-                if float(p).is_integer() 
+                str(int(p))
+                if float(p).is_integer()
                 else str(p) for p in percentiles
             ]
 

@@ -7,7 +7,7 @@ specific hydrophone serial numbers/deployment IDs.
 
 """
 
-import os
+import os #pylint: disable=unused-import
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -69,7 +69,6 @@ class MetadataReader(ABC):
         SeaSoundError
             If the file can't be read or no matching row is found.
         """
-        ...
 
 
 class SeaSoundMetadataReader(MetadataReader):
@@ -89,7 +88,7 @@ class SeaSoundMetadataReader(MetadataReader):
         except Exception as exc:
             raise SeaSoundError(
                 f"Could not read metadata CSV {filepath}: {exc}"
-            )
+            ) from exc
 
         df.columns = df.columns.str.strip().str.lower()
 
@@ -122,7 +121,7 @@ class SeaSoundMetadataReader(MetadataReader):
             location_id=location_id,
             hydrophone=hydrophone,
         )
-    
+
 
 class GenericExcelReader(MetadataReader):
     """
@@ -165,7 +164,7 @@ class GenericExcelReader(MetadataReader):
         except Exception as exc:
             raise SeaSoundError(
                 f"Could not read metadata Excel {filepath}: {exc}"
-            )
+            ) from exc
 
         df.columns = df.columns.str.strip()
         cm = self.column_map

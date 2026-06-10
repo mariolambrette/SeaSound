@@ -8,9 +8,25 @@ Calibration is the single most important step for producing physically
 meaningful acoustic measurements. Without it, you have relative
 numbers that cannot be compared between deployments, instruments,
 or studies.
+
+Calibration is split into two phases so the streaming pipeline can
+resolve once per file and apply per block:
+
+- resolve_calibration(): all per-file work — serial lookup (with
+  leading-zero fallback), sensitivity_db_override, NaN handling,
+  strict-vs-warn semantics, and method selection. Returns a
+  ResolvedCalibration carrying the method and resolved sensitivity.
+- ResolvedCalibration.apply() / .apply_inplace(): the per-sample work.
+  apply() allocates (legacy behaviour); apply_inplace() mutates the
+  block, applying the method's exact floating-point operation order so
+  results are bit-identical to apply().
+
+apply_calibration() remains the legacy single-call API and is now the
+composition of the two phases.
 """
 
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -19,7 +35,10 @@ import pandas as pd
 from seasound.core.config import CalibrationConfig
 from seasound.core.exceptions import CalibrationError
 from seasound.loader.reader import AudioSegment
-from seasound.loader.calibration_methods import get_calibration_method
+from seasound.loader.calibration_methods import (
+    CalibrationMethod,
+    get_calibration_method,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +72,8 @@ def load_calibration(config: CalibrationConfig) -> Optional[pd.DataFrame]:
 
     if config.sensitivity_db_override is not None:
         logger.info(
-            f"Using sensitivity override: {config.sensitivity_db_override:.2f} dB "
-            f"(calibration file will not be loaded)"
+            "Using sensitivity override: %.2f dB (calibration file will not be loaded)",
+            config.sensitivity_db_override,
         )
         return None
 
@@ -63,16 +82,16 @@ def load_calibration(config: CalibrationConfig) -> Optional[pd.DataFrame]:
     except FileNotFoundError:
         msg = f"Calibration file not found: {config.file}"
         if config.strict:
-            raise CalibrationError(msg)
-        logger.warning(msg + " — proceeding without calibration")
+            raise CalibrationError(msg) #pylint: disable=raise-missing-from
+        logger.warning("%s — proceeding without calibration", msg)
         return None
-    except Exception as exc:
+    except Exception as exc: #pylint: disable=broad-exception-caught
         msg = f"Could not read calibration file {config.file}: {exc}"
         if config.strict:
-            raise CalibrationError(msg)
-        logger.warning(msg + " — proceeding without calibration")
+            raise CalibrationError(msg) #pylint: disable=raise-missing-from
+        logger.warning("%s — proceeding without calibration", msg)
         return None
-    
+
     # --- Identify serial column ---
     serial_col = config.serial_column
 
@@ -104,9 +123,207 @@ def load_calibration(config: CalibrationConfig) -> Optional[pd.DataFrame]:
         return None
 
     logger.info(
-        f"Loaded calibration for {len(df)} serial(s) from {config.file}"
+        "Loaded calibration for %d serial(s) from %s", len(df), config.file
     )
     return df
+
+
+@dataclass(frozen=True)
+class ResolvedCalibration:
+    """
+    The outcome of per-file calibration resolution.
+
+    When ``calibrated`` is False, both application methods return the
+    input unchanged (the legacy uncalibrated fallback). When True,
+    ``method`` and ``sensitivity_db`` are set and application converts
+    samples to Pascals.
+
+    Attributes
+    ----------
+    method : CalibrationMethod or None
+        Conversion method instance; None when uncalibrated.
+    sensitivity_db : float or None
+        Resolved sensitivity (from the table or the override);
+        None when uncalibrated.
+    vpp : float
+        Peak-to-peak voltage from the config (used by some methods).
+    calibrated : bool
+        Whether calibration will actually be applied. Flows into
+        SegmentArtifact / save_base_matrix unchanged.
+    """
+    method: Optional[CalibrationMethod]
+    sensitivity_db: Optional[float]
+    vpp: float
+    calibrated: bool
+
+    def apply(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Convert samples to Pascals, allocating a new array (legacy
+        apply_calibration behaviour). Uncalibrated: returns ``samples``
+        itself, unchanged.
+        """
+        if not self.calibrated:
+            return samples
+        return self.method.to_pascals(samples, self.sensitivity_db, self.vpp) #type: ignore
+
+    def apply_inplace(self, block: np.ndarray) -> np.ndarray:
+        """
+        Convert one block to Pascals in place and return it.
+
+        Bit-identical to apply() — the method replays the same
+        floating-point operations in the same order on the mutated
+        array. Uncalibrated: returns ``block`` itself, untouched.
+
+        Raises
+        ------
+        NotImplementedError
+            If the resolved method does not support per-sample scalar
+            in-place application (loud failure for future non-scalar
+            methods, e.g. frequency-dependent calibration).
+        """
+        if not self.calibrated:
+            return block
+        return self.method.calibrate_inplace( #type: ignore
+            block, self.sensitivity_db, self.vpp #type: ignore
+        )
+
+
+def resolve_calibration(
+    segment: AudioSegment,
+    cal_df: Optional[pd.DataFrame],
+    config: CalibrationConfig,
+) -> ResolvedCalibration:
+    """
+    Resolve per-file calibration state without touching sample data.
+
+    All lookup, override, strict-vs-warn, and fallback semantics of the
+    legacy apply_calibration() live here, with identical messages and
+    identical CalibrationError behaviour under strict=True. The sample
+    arithmetic is deferred to the returned ResolvedCalibration.
+
+    Parameters
+    ----------
+    segment : AudioSegment
+        Only ``segment.serial`` and ``segment.source_file`` are read, so
+        any object carrying those attributes (e.g. file metadata in the
+        streaming path, where no sample data exists yet) is accepted.
+    cal_df : pd.DataFrame or None
+        Calibration table from load_calibration().
+    config : CalibrationConfig
+
+    Returns
+    -------
+    ResolvedCalibration
+
+    Raises
+    ------
+    CalibrationError
+        When strict=True and calibration cannot be resolved.
+    """
+    uncalibrated = ResolvedCalibration(
+        method=None, sensitivity_db=None, vpp=config.vpp, calibrated=False,
+    )
+
+    # --- sensitivity_db_override: bypass file lookup entirely ---
+    if config.enabled and config.sensitivity_db_override is not None:
+        try:
+            method = get_calibration_method(config.method)
+        except ValueError as exc:
+            if config.strict:
+                raise CalibrationError(str(exc)) from exc
+            logger.warning(str(exc))
+            return uncalibrated
+        logger.debug(
+            "Calibration applied via override: method=%s, sensitivity=%.1f dB",
+            config.method,
+            config.sensitivity_db_override,
+        )
+        return ResolvedCalibration(
+            method=method,
+            sensitivity_db=config.sensitivity_db_override,
+            vpp=config.vpp,
+            calibrated=True,
+        )
+
+    if cal_df is None:
+        if config.strict and config.enabled:
+            raise CalibrationError(
+                f"No calibration data available for serial {segment.serial}"
+            )
+        return uncalibrated
+
+    serial = segment.serial
+    if serial is None:
+        msg = (
+            f"No serial number extracted from {segment.source_file}; "
+            f"cannot look up calibration"
+        )
+        if config.strict:
+            raise CalibrationError(msg)
+        logger.warning("%s — returning uncalibrated data", msg)
+        return uncalibrated
+
+    # --- Look up serial in calibration table ---
+    serial_str = str(serial).strip()
+
+    # Try exact match, then integer form (handles leading zeros)
+    if serial_str not in cal_df.index:
+        # Try stripping leading zeros
+        alt = str(int(serial_str)) if serial_str.isdigit() else serial_str
+        if alt in cal_df.index:
+            serial_str = alt
+        else:
+            msg = (
+                f"Serial '{serial}' not found in calibration table. "
+                f"Available serials: {', '.join(cal_df.index[:10].tolist())}"
+                f"{'...' if len(cal_df) > 10 else ''}"
+            )
+            if config.strict:
+                raise CalibrationError(msg)
+            logger.warning("%s — returning uncalibrated data", msg)
+            return uncalibrated
+
+    # --- Get sensitivity value ---
+    sens_col = config.sensitivity_column
+    try:
+        sens_db = float(cal_df.loc[serial_str, sens_col]) # pyright: ignore[reportArgumentType]
+    except (KeyError, TypeError, ValueError) as exc:
+        msg = f"Could not read {sens_col} for serial {serial_str}: {exc}"
+        if config.strict:
+            raise CalibrationError(msg) from exc
+        logger.warning(msg)
+        return uncalibrated
+
+    if pd.isna(sens_db):
+        msg = f"{sens_col} for serial {serial_str} is NaN"
+        if config.strict:
+            raise CalibrationError(msg)
+        logger.warning(msg)
+        return uncalibrated
+
+    # --- Select the configured conversion method ---
+    try:
+        method = get_calibration_method(config.method)
+    except ValueError as exc:
+        msg = str(exc)
+        if config.strict:
+            raise CalibrationError(msg) from exc
+        logger.warning(msg)
+        return uncalibrated
+
+    logger.debug(
+        "Calibration applied: serial=%s, method=%s, sensitivity=%.1f dB",
+        serial_str,
+        config.method,
+        sens_db,
+    )
+
+    return ResolvedCalibration(
+        method=method,
+        sensitivity_db=sens_db,
+        vpp=config.vpp,
+        calibrated=True,
+    )
 
 
 def apply_calibration(
@@ -116,6 +333,11 @@ def apply_calibration(
 ) -> tuple[np.ndarray, bool]:
     """
     Convert normalised audio samples to pressure in Pascals.
+
+    Legacy single-call API: equivalent to resolve_calibration() followed
+    by ResolvedCalibration.apply(). Allocates a calibrated copy; the
+    streaming pipeline uses resolve_calibration() once per file and
+    apply_inplace() per block instead.
 
     Parameters
     ----------
@@ -166,97 +388,5 @@ def apply_calibration(
     Always check your manufacturer's documentation for the exact meaning
     of their calibration values!
     """
-    # --- sensitivity_db_override: bypass file lookup entirely ---
-    if config.enabled and config.sensitivity_db_override is not None:
-        try:
-            method = get_calibration_method(config.method)
-        except ValueError as exc:
-            if config.strict:
-                raise CalibrationError(str(exc))
-            logger.warning(str(exc))
-            return segment.data, False
-        pressure_pa = method.to_pascals(
-            segment.data, config.sensitivity_db_override, config.vpp
-        )
-        logger.debug(
-            f"Calibration applied via override: "
-            f"method={config.method}, "
-            f"sensitivity={config.sensitivity_db_override:.1f} dB"
-        )
-        return pressure_pa, True
-
-    if cal_df is None:
-        if config.strict and config.enabled:
-            raise CalibrationError(
-                f"No calibration data available for serial {segment.serial}"
-            )
-        return segment.data, False
-    
-    serial = segment.serial
-    if serial is None:
-        msg = (
-            f"No serial number extracted from {segment.source_file}; "
-            f"cannot look up calibration"
-        )
-        if config.strict:
-            raise CalibrationError(msg)
-        logger.warning(msg + " — returning uncalibrated data")
-        return segment.data, False
-    
-    # --- Look up serial in calibration table ---
-    serial_str = str(serial).strip()
-
-    # Try exact match, then integer form (handles leading zeros)
-    if serial_str not in cal_df.index:
-        # Try stripping leading zeros
-        alt = str(int(serial_str)) if serial_str.isdigit() else serial_str
-        if alt in cal_df.index:
-            serial_str = alt
-        else:
-            msg = (
-                f"Serial '{serial}' not found in calibration table. "
-                f"Available serials: {', '.join(cal_df.index[:10].tolist())}"
-                f"{'...' if len(cal_df) > 10 else ''}"
-            )
-            if config.strict:
-                raise CalibrationError(msg)
-            logger.warning(msg + " — returning uncalibrated data")
-            return segment.data, False
-
-    # --- Get sensitivity value ---
-    sens_col = config.sensitivity_column
-    try:
-        sens_db = float(cal_df.loc[serial_str, sens_col]) # pyright: ignore[reportArgumentType]
-    except (KeyError, TypeError, ValueError) as exc:
-        msg = f"Could not read {sens_col} for serial {serial_str}: {exc}"
-        if config.strict:
-            raise CalibrationError(msg)
-        logger.warning(msg)
-        return segment.data, False
-
-    if pd.isna(sens_db):
-        msg = f"{sens_col} for serial {serial_str} is NaN"
-        if config.strict:
-            raise CalibrationError(msg)
-        logger.warning(msg)
-        return segment.data, False
-
-    # --- Apply conversion using configured method ---
-    try:
-        method = get_calibration_method(config.method)
-    except ValueError as exc:
-        msg = str(exc)
-        if config.strict:
-            raise CalibrationError(msg)
-        logger.warning(msg)
-        return segment.data, False
-
-    pressure_pa = method.to_pascals(segment.data, sens_db, config.vpp)
-
-    logger.debug(
-        f"Calibration applied: serial={serial_str}, "
-        f"method={config.method}, "
-        f"sensitivity={sens_db:.1f} dB"
-    )
-
-    return pressure_pa, True
+    resolved = resolve_calibration(segment, cal_df, config)
+    return resolved.apply(segment.data), resolved.calibrated

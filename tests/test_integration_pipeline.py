@@ -5,14 +5,20 @@ import json
 from datetime import timedelta
 
 import pandas as pd
-import pytest
+import pytest #pylint: disable=unused-import
 
 from seasound.core.pipeline import run_loading, get_clip_bounds, run_pipeline
-from seasound.core.config import PipelineConfig, InputConfig, DeploymentConfig, DeploymentBufferConfig
+from seasound.core.config import( #pylint: disable=unused-import
+    PipelineConfig,
+    InputConfig,
+    DeploymentConfig,
+    DeploymentBufferConfig
+)
 from seasound.loader.cache import is_cached
 
 
 def test_end_to_end_ingestion_to_cache(test_config, synthetic_wav):
+    """..."""
     # Arrange
     test_config.input.path = os.path.dirname(synthetic_wav)
     test_config.pipeline.resume = False
@@ -28,6 +34,7 @@ def test_end_to_end_ingestion_to_cache(test_config, synthetic_wav):
 
 
 def test_resume_partial_multichannel_processes_missing_channel(test_config, synthetic_stereo_wav):
+    """..."""
     # Arrange: auto channel strategy should create two channel caches
     test_config.input.path = os.path.dirname(synthetic_stereo_wav)
     test_config.input.channel_strategy = "auto"
@@ -53,6 +60,7 @@ def test_resume_partial_multichannel_processes_missing_channel(test_config, synt
 
 
 def test_clip_none_uses_full_extent(test_config, synthetic_base_matrix):
+    """..."""
     test_config.deployment = DeploymentConfig(
         enabled=True,
         clip_method="none",
@@ -65,6 +73,7 @@ def test_clip_none_uses_full_extent(test_config, synthetic_base_matrix):
 
 
 def test_clip_manual_applies_shared_buffer(test_config, synthetic_base_matrix):
+    """..."""
     raw_start = synthetic_base_matrix.index.min()
     raw_end = synthetic_base_matrix.index.max()
 
@@ -82,6 +91,7 @@ def test_clip_manual_applies_shared_buffer(test_config, synthetic_base_matrix):
 
 
 def test_manifest_written_after_pipeline_run(test_config, synthetic_wav):
+    """..."""
     test_config.input.path = os.path.dirname(synthetic_wav)
     test_config.load_only = True
 
@@ -89,7 +99,7 @@ def test_manifest_written_after_pipeline_run(test_config, synthetic_wav):
 
     manifest = os.path.join(test_config.output.directory, "run_manifest.json")
     assert os.path.isfile(manifest)
-    with open(manifest, "r") as f:
+    with open(manifest, "r") as f: #pylint: disable=unspecified-encoding
         payload = json.load(f)
     assert "seasound_version" in payload
     assert "config_summary" in payload

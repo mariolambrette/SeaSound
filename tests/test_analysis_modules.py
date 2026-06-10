@@ -16,6 +16,30 @@ from seasound.analysis.spectrogram import SpectrogramAnalysis
 from seasound.analysis.tob_levels import TOBLevelsAnalysis
 
 
+def _seed_stft_store(wav_path, test_config, cache_dir):
+    """Seed the STFT shard store exactly as the streaming loader would.
+
+    Store-backed analog of the old npz path: the spectrogram (refactor
+    §8) reads STFT from ``cache_dir/stft`` shards rather than computing
+    it on the fly, so tests that exercise a rendered spectrogram must
+    seed the store first. Running the production streaming path writes
+    the same shards the loader produces.
+    """
+    import copy
+    from seasound.core.pipeline import _process_one_file_streaming
+    from seasound.core.substrates import BASE_MATRIX, STFT
+    from seasound.loader.calibration import load_calibration
+    from seasound.loader.filename_parsers import get_parser
+
+    cfg = copy.deepcopy(test_config)
+    cfg.pipeline.stft_enabled = True
+    cal_df = load_calibration(cfg.calibration)
+    _process_one_file_streaming(
+        wav_path, cfg, cal_df, cache_dir,
+        {BASE_MATRIX, STFT}, get_parser(cfg.input),
+    )
+
+
 class TestLTSAAnalysis:
     """Tests for LTSA module."""
 
@@ -293,11 +317,11 @@ class TestSpectrogramAnalysis:
         self, synthetic_base_matrix, synthetic_wav, test_config, tmp_path
     ):
         module = SpectrogramAnalysis()
+        _seed_stft_store(synthetic_wav, test_config, str(tmp_path))
         module.set_runtime_context(
             {
                 "pipeline_config": test_config,
                 "cache_dir": str(tmp_path),
-                "input_files": [synthetic_wav],
             }
         )
         cfg = {"output_format": "csv"}
@@ -313,11 +337,11 @@ class TestSpectrogramAnalysis:
         self, synthetic_base_matrix, synthetic_wav, test_config, tmp_path
     ):
         module = SpectrogramAnalysis()
+        _seed_stft_store(synthetic_wav, test_config, str(tmp_path))
         module.set_runtime_context(
             {
                 "pipeline_config": test_config,
                 "cache_dir": str(tmp_path),
-                "input_files": [synthetic_wav],
             }
         )
         cfg = {"output_format": "csv", "time_chunk": "5s"}
@@ -337,11 +361,11 @@ class TestSpectrogramAnalysis:
             pytest.skip("matplotlib not installed")
 
         module = SpectrogramAnalysis()
+        _seed_stft_store(synthetic_wav, test_config, str(tmp_path))
         module.set_runtime_context(
             {
                 "pipeline_config": test_config,
                 "cache_dir": str(tmp_path),
-                "input_files": [synthetic_wav],
             }
         )
         cfg = {"output_format": "png", "dpi": 150}
@@ -360,11 +384,11 @@ class TestSpectrogramAnalysis:
             pytest.skip("matplotlib not installed")
 
         module = SpectrogramAnalysis()
+        _seed_stft_store(synthetic_wav, test_config, str(tmp_path))
         module.set_runtime_context(
             {
                 "pipeline_config": test_config,
                 "cache_dir": str(tmp_path),
-                "input_files": [synthetic_wav],
             }
         )
         cfg = {"output_format": "png", "preserve_time_gaps": True}
@@ -403,4 +427,3 @@ class TestAnalysisRegistry:
     def test_get_analysis_unknown_raises(self):
         with pytest.raises(ValueError):
             get_analysis("nonexistent_module")
-

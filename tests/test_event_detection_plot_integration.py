@@ -86,7 +86,7 @@ def test_annotated_spectrogram_warns_without_stft(
     )
 
 def test_annotated_spectrogram_chunking_config_parses(
-    base_matrix_with_spike, tmp_path,
+    base_matrix_with_spike, tmp_path, #pylint: disable=redefined-outer-name
 ):
     """time_chunk + time_bins parse correctly and don't crash the run.
 

@@ -6,7 +6,7 @@ Creates time-frequency heatmap visualizations using matplotlib.
 
 import os
 import logging
-from collections.abc import Iterator
+
 from copy import copy
 
 import pandas as pd
@@ -14,7 +14,7 @@ import numpy as np
 
 from seasound.analysis.base import AnalysisModule, AnalysisResult, AnalysisModuleError
 from seasound.analysis.registry import register_analysis
-from seasound.analysis.calculate_stft import build_stft_matrix
+from seasound.core.stft import iter_stft_windows
 from seasound.core.output_layout import resolve_spectrogram_output_dir
 
 logger = logging.getLogger(__name__)
@@ -23,27 +23,17 @@ logger = logging.getLogger(__name__)
 class SpectrogramAnalysis(AnalysisModule):
     """
     Spectrogram analysis.
-    
+
     Creates a time-frequency heatmap (PNG) visualization of the base matrix.
     X-axis: time, Y-axis: frequency (Hz), color: SPL (dB).
     """
 
     name = "spectrogram"
 
+    # STFT-derived data, plus the base matrix for overlays (refactor §7).
+    REQUIRES = frozenset({"stft", "base_matrix"})
+
     def validate_config(self, cfg: dict) -> None:
-        """
-        Validate Spectrogram configuration.
-        
-        Optional keys:
-        - freq_range: [freq_min_hz, freq_max_hz] or null for all
-        - db_range: [db_min, db_max] or null for automatic scaling
-        - colormap: matplotlib colormap name (default: "viridis")
-        - output_format: "png" (default), "pdf", or "csv"
-        - dpi: output DPI (default: 300)
-        - time_chunk: pandas offset alias (e.g. "1h", "1d") or null
-        - time_bins: target number of visual time bins for png/pdf outputs
-        - preserve_time_gaps: bool, render missing seconds as blank columns
-        """
         errors = []
 
         freq_range = cfg.get("freq_range")
@@ -144,28 +134,40 @@ class SpectrogramAnalysis(AnalysisModule):
             time_bins = cfg.get("time_bins", 12000)
             preserve_time_gaps = cfg.get("preserve_time_gaps", False)
             warnings: list[str] = []
-
-            # Spectrogram outputs are always STFT-derived.
-            stft_matrix, stft_warnings = build_stft_matrix(
-                self._get_runtime_context(),
-                time_bins=time_bins,
-            )
-            warnings.extend(stft_warnings)
-            if stft_matrix is None or stft_matrix.empty:
-                raise AnalysisModuleError(
-                    "Spectrogram requires STFT data, but STFT frames were "
-                    "not available from cache or on-demand computation."
-                )
-            source_matrix = stft_matrix
             data_source = "STFT-derived matrix"
-
-            # Filter frequencies
             freq_range = cfg.get("freq_range")
-            work_matrix = self._filter_frequencies(source_matrix, freq_range)
 
+            # Spectrogram outputs are STFT-derived, read per time_chunk
+            # window on the global downsampling grid (refactor §8): each
+            # window loads only its own native frames, so peak memory is
+            # bounded by the window rather than the whole deployment. The
+            # per-window arrays are identical to slicing the legacy
+            # globally-downsampled matrix by time_chunk (gated, §9 test 7).
+            chunks: list[tuple[pd.Timestamp, pd.Timestamp, pd.DataFrame]] = []
+            for window_start, window_end, window in iter_stft_windows(
+                self._get_runtime_context(),
+                time_chunk=time_chunk,
+                time_bins=time_bins,
+                warnings=warnings,
+            ):
+                if window.empty:
+                    continue
+                work_chunk = self._filter_frequencies(window, freq_range)
+                if work_chunk.empty:
+                    continue
+                chunks.append((window_start, window_end, work_chunk))
 
-            if work_matrix.empty:
-                raise AnalysisModuleError("Spectrogram input is empty after filtering")
+            if not chunks:
+                raise AnalysisModuleError(
+                    "Spectrogram requires STFT data, but no STFT frames were "
+                    "available from the shard store."
+                )
+
+            # Whole-run summary metadata, aggregated across windows.
+            n_time_samples = sum(len(c[2]) for c in chunks)
+            n_frequencies = len(chunks[0][2].columns)
+            time_min = min(c[0] for c in chunks)
+            time_max = max(c[1] for c in chunks)
 
             # Resolve and create the output directory under spectrograms/.
             # When the annotated spectrogram is also enabled, this becomes
@@ -178,41 +180,6 @@ class SpectrogramAnalysis(AnalysisModule):
 
             def _format_ts_for_filename(ts: pd.Timestamp) -> str:
                 return ts.strftime("%Y%m%dT%H%M%S")
-
-            def _iter_time_chunks() -> Iterator[tuple[pd.Timestamp, pd.Timestamp, pd.DataFrame]]:
-                if not isinstance(work_matrix.index, pd.DatetimeIndex):
-                    raise AnalysisModuleError("Spectrogram requires a DatetimeIndex")
-
-                if time_chunk is None:
-                    start = work_matrix.index.min()
-                    end = work_matrix.index.max()
-                    if not isinstance(start, pd.Timestamp) or not isinstance(end, pd.Timestamp):
-                        raise AnalysisModuleError(
-                            "Could not determine spectrogram time bounds"
-                        )
-                    yield start, end, work_matrix
-                    return
-
-                for _, group in work_matrix.resample(time_chunk):
-                    if group.empty:
-                        continue
-
-                    if not isinstance(group.index, pd.DatetimeIndex):
-                        raise AnalysisModuleError("Chunk index must be DatetimeIndex")
-
-                    window_start = group.index.min()
-                    window_end = group.index.max()
-                    if (
-                        not isinstance(window_start, pd.Timestamp)
-                        or not isinstance(window_end, pd.Timestamp)
-                    ):
-                        raise AnalysisModuleError("Could not determine chunk bounds")
-
-                    yield window_start, window_end, group
-
-            chunks = list(_iter_time_chunks())
-            if not chunks:
-                raise AnalysisModuleError("No spectrogram chunks produced")
 
             outputs: list[str] = []
 
@@ -241,9 +208,9 @@ class SpectrogramAnalysis(AnalysisModule):
                         "time_chunk": time_chunk if time_chunk is not None else "full",
                         "time_bins": time_bins,
                         "preserve_time_gaps": preserve_time_gaps,
-                        "n_time_samples": len(work_matrix),
-                        "n_frequencies": len(work_matrix.columns),
-                        "time_range": f"{work_matrix.index.min()} to {work_matrix.index.max()}",
+                        "n_time_samples": n_time_samples,
+                        "n_frequencies": n_frequencies,
+                        "time_range": f"{time_min} to {time_max}",
                     },
                     warnings=warnings,
                 )
@@ -374,9 +341,9 @@ class SpectrogramAnalysis(AnalysisModule):
                     "time_bins": time_bins,
                     "preserve_time_gaps": preserve_time_gaps,
                     "missing_seconds_visualized": missing_seconds_visualized,
-                    "n_time_samples": len(work_matrix),
-                    "n_frequencies": len(work_matrix.columns),
-                    "time_range": f"{work_matrix.index.min()} to {work_matrix.index.max()}",
+                    "n_time_samples": n_time_samples,
+                    "n_frequencies": n_frequencies,
+                    "time_range": f"{time_min} to {time_max}",
                     "db_range": db_range if db_range else "auto",
                 },
                 warnings=warnings,

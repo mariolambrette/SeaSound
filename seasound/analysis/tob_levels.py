@@ -12,8 +12,8 @@ import pandas as pd
 import numpy as np
 
 from seasound.analysis.base import (
-    AnalysisModule, 
-    AnalysisResult, 
+    AnalysisModule,
+    AnalysisResult,
     AnalysisModuleError
 )
 from seasound.analysis.registry import register_analysis

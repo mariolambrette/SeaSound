@@ -1,0 +1,10 @@
+{
+  "kind": "stft",
+  "channels": [
+    {
+      "channel": 0,
+      "serial": "9999",
+      "datetime_start": "2026-01-01T12:00:00"
+    }
+  ]
+}

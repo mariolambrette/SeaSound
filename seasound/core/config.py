@@ -13,14 +13,24 @@ Configuration validation occurs in three stages:
 
 Validation errors raise ConfigError with a human-readable message
 listing all problems (not just the first one found).
+
+In addition to the error-raising validate(), check_config_keys() emits
+non-fatal warnings for unknown, removed, or inert config keys. Unknown keys
+are otherwise silently dropped by _build_dataclass; surfacing them catches
+typos and warns about keys that have lost their effect under the streaming
+path before they are removed.
 """
 
 import os
+import logging
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional
 import yaml
 
 from seasound.core.exceptions import ConfigError
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Dataclass definitions — one per config section
@@ -122,11 +132,18 @@ class ProcessingConfig:
     reference_pressure_pa: float = 1e-6
     domain: str = "underwater"
     missing_band_strategy: str = "nan"
-    cache_base_matrix: bool = True
+    # Base-matrix numeric levers. Defaults reproduce the float32 golden
+    # baseline; DO NOT CHANGE either if outputs must stay comparable
+    # across runs and deployments (both alter the numerics).
+    nfft_padding_factor: int = 4   # JOMOPANS 4x zero-padding
+    sxx_dtype: str = "float32"     # "float32" | "float64"
     cache_directory: Optional[str] = None
 
+    # Streaming Stage-1 path (refactor plan Stage 2): whole-bin block
+    # streaming, per-worker memory bounded by one block.
+    streaming_block_seconds: int = 60
+
     # Optional linear STFT support
-    stft_cache_enabled: bool = False
     stft_nfft: int = 2048
     stft_win_length: int = 2048
     stft_hop_length: int = 1024
@@ -134,6 +151,24 @@ class ProcessingConfig:
     stft_fmin_hz: float = 10.0
     stft_fmax_hz: float = 50000.0
     stft_dtype: str = "float32"    # "float32" | "float16"
+    # zarr chunk length (frames) along the time axis of STFT shards
+    # written by the streaming path (refactor Stage 3). Larger chunks
+    # compress better; smaller chunks make narrow windowed reads
+    # cheaper. The default suits hour-scale consumer windows.
+    stft_time_chunk_frames: int = 8192
+
+    # Substrate producer overrides (refactor §7). None = the resolver
+    # (core/substrates.py) decides from the enabled analyses' needs;
+    # True = force the producer on even when no analysis needs it;
+    # False = force it off, in which case an enabled analysis that
+    # needs it is skipped with a warning (warn-and-skip). These are the
+    # resolver's force levers, wired into the producer-resolution loop
+    # (Stage 5b); they are the sole gate on what each file produces.
+    # The base matrix is the foundational Stage-1 product (returned and
+    # clipped by run_loading, and produced even by --load-only with no
+    # analyses), so it defaults force-on; STFT is left resolver-decided.
+    base_matrix_enabled: Optional[bool] = True
+    stft_enabled: Optional[bool] = None
 
 
 @dataclass
@@ -206,13 +241,93 @@ def merge_cli(base: dict, overrides: dict) -> dict:
     return base
 
 
+# ---------------------------------------------------------------------------
+# Config-key hygiene (warn on unknown / removed keys)
+# ---------------------------------------------------------------------------
+
+# Keys that once existed (or were proposed) but are no longer read. Mapped to
+# a tailored message so the user gets guidance rather than a bare "unknown".
+_REMOVED_KEYS = {
+    "pipeline.chunk_duration_s": (
+        "is no longer used: under the streaming path each block is the chunk "
+        "(see pipeline.streaming_block_seconds)."
+    ),
+    "pipeline.streaming_enabled": (
+        "is no longer used: streaming is now the only Stage-1 path "
+        "(the legacy full-read path was removed)."
+    ),
+    "pipeline.stft_cache_enabled": (
+        "is no longer used: the streaming path writes STFT shards to the "
+        "STFT store (the legacy npz cache was removed)."
+    ),
+    "pipeline.cache_base_matrix": (
+        "is no longer used: the streaming path always caches the base matrix "
+        "(the resolver and resume rule treat the parquet as the product)."
+    ),
+}
+
+
+def _schema_keys(cls, prefix: str = ""):
+    """Return (all_valid_dotted_keys, dataclass_section_dotted_keys) for cls.
+
+    Recurses into nested dataclass fields only. dict-typed fields (e.g.
+    analyses, deployment.metadata_columns) are leaves: their contents are
+    user-defined and must not be flagged as unknown.
+    """
+    all_keys: set = set()
+    sections: set = set()
+    for f in dataclasses.fields(cls):
+        dotted = f"{prefix}{f.name}"
+        all_keys.add(dotted)
+        if dataclasses.is_dataclass(f.type):
+            sections.add(dotted)
+            sub_all, sub_sections = _schema_keys(f.type, prefix=f"{dotted}.")
+            all_keys |= sub_all
+            sections |= sub_sections
+    return all_keys, sections
+
+
+def _iter_present_keys(raw: dict, sections: set, prefix: str = ""):
+    """Yield the dotted keys actually present in raw, descending only into
+    known dataclass sections so dict-leaf contents are not walked."""
+    if not isinstance(raw, dict):
+        return
+    for key, value in raw.items():
+        dotted = f"{prefix}{key}"
+        yield dotted
+        if isinstance(value, dict) and dotted in sections:
+            yield from _iter_present_keys(value, sections, prefix=f"{dotted}.")
+
+
+def check_config_keys(raw: dict) -> list[str]:
+    """Human-readable warnings for unknown or removed config keys.
+
+    Pure: logs nothing and raises nothing (mirrors substrates.validate_*),
+    so the caller controls logging and it stays unit-testable. Unknown keys
+    are silently dropped by _build_dataclass; this surfaces them before they
+    cause confusion, and gives removed keys a tailored migration message.
+    """
+    valid, sections = _schema_keys(PipelineConfig)
+    present = set(_iter_present_keys(raw, sections))
+    warnings: list[str] = []
+
+    # Unknown / removed keys.
+    for dotted in sorted(present - valid):
+        if dotted in _REMOVED_KEYS:
+            warnings.append(f"Config key '{dotted}' {_REMOVED_KEYS[dotted]}")
+        else:
+            warnings.append(
+                f"Unknown config key '{dotted}' — ignored. Check for a typo."
+            )
+
+    return warnings
+
+
 def _build_dataclass(cls, data: dict):
     """
     Recursively build a dataclass from a dict, ignoring unknown keys.
     Handles nested dataclasses by inspecting field types.
     """
-    import dataclasses
-
     if not isinstance(data, dict):
         return data
 
@@ -293,6 +408,9 @@ def validate(raw: dict) -> PipelineConfig:
     if config.pipeline.stft_fmin_hz >= config.pipeline.stft_fmax_hz:
         errors.append("pipeline.stft_fmin_hz must be < pipeline.stft_fmax_hz")
 
+    if config.pipeline.stft_time_chunk_frames <= 0:
+        errors.append("pipeline.stft_time_chunk_frames must be positive")
+
     # --- Calibration validation ---
     if (
         config.calibration.enabled
@@ -333,6 +451,37 @@ def validate(raw: dict) -> PipelineConfig:
         errors.append(
             "pipeline.max_freq_hz must be greater than pipeline.min_freq_hz"
         )
+
+    if config.pipeline.nfft_padding_factor < 1:
+        errors.append("pipeline.nfft_padding_factor must be >= 1")
+
+    valid_sxx_dtypes = {"float32", "float64"}
+    if config.pipeline.sxx_dtype not in valid_sxx_dtypes:
+        errors.append(
+            f"pipeline.sxx_dtype must be one of: "
+            f"{', '.join(sorted(valid_sxx_dtypes))}"
+        )
+
+    bs = config.pipeline.streaming_block_seconds
+    res = config.pipeline.base_resolution_s
+    if not isinstance(bs, int) or bs < 1:
+        errors.append(
+            f"pipeline.streaming_block_seconds must be a positive integer; "
+            f"got {bs}"
+        )
+    elif isinstance(res, int) and res >= 1 and bs % res != 0:
+        errors.append(
+            f"pipeline.streaming_block_seconds ({bs}) must be a whole "
+            f"multiple of pipeline.base_resolution_s ({res})"
+        )
+
+    for _override in ("base_matrix_enabled", "stft_enabled"):
+        _val = getattr(config.pipeline, _override)
+        if _val is not None and not isinstance(_val, bool):
+            errors.append(
+                f"pipeline.{_override} must be true, false, or null; "
+                f"got {_val!r}"
+            )
 
     # --- Deployment validation ---
     if config.deployment.enabled:
@@ -401,4 +550,6 @@ def load_config(
     """
     raw = load_yaml(config_path)
     raw = merge_cli(raw, cli_overrides or {})
+    for warning in check_config_keys(raw):
+        logger.warning(warning)
     return validate(raw)

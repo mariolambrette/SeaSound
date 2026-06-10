@@ -1,5 +1,3 @@
-# SeaSound/pyproject.toml
-
 [build-system]
 requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -20,11 +18,13 @@ dependencies = [
     "openpyxl>=3.1",
     "pyyaml>=6.0",
     "matplotlib>=3.7",
+    "zarr>=3,<4",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov"]
 maad = ["scikit-maad>=1.3"]
+profile = ["psutil>=5.9", "memory_profiler>=0.61"]
 
 [project.scripts]
 seasound = "seasound.core.pipeline:cli_main"

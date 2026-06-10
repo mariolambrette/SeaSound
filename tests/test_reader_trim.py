@@ -20,6 +20,7 @@ def _write_sine_wav(
 
 
 def test_trim_zero_is_noop(tmp_path):
+    """If trim is 0, the full audio should be read and datetime_start should be unchanged."""
     wav = str(tmp_path / "9999.250101120000.wav")
     _write_sine_wav(wav, duration_s=5.0, sample_rate=96000)
     config = InputConfig(
@@ -30,6 +31,10 @@ def test_trim_zero_is_noop(tmp_path):
 
 
 def test_trim_default_three_seconds(tmp_path):
+    """
+    If trim is 3, the first 3 seconds should be skipped and datetime_start
+    should be shifted by 3 seconds.
+    """
     wav = str(tmp_path / "9999.250101120000.wav")
     _write_sine_wav(wav, duration_s=5.0, sample_rate=96000)
     config = InputConfig(
@@ -40,6 +45,7 @@ def test_trim_default_three_seconds(tmp_path):
 
 
 def test_trim_shifts_datetime_start(tmp_path):
+    """The datetime_start should be shifted by the trim duration."""
     wav = str(tmp_path / "9999.250101120000.wav")
     _write_sine_wav(wav, duration_s=5.0, sample_rate=96000)
     config = InputConfig(
@@ -50,6 +56,10 @@ def test_trim_shifts_datetime_start(tmp_path):
 
 
 def test_trim_exceeds_duration_returns_empty(tmp_path, caplog):
+    """
+    If trim exceeds the file duration, the returned audio should be empty and 
+    a warning should be logged.
+    """
     wav = str(tmp_path / "9999.250101120000.wav")
     _write_sine_wav(wav, duration_s=1.0, sample_rate=96000)
     config = InputConfig(
@@ -96,7 +106,7 @@ def test_fractional_trim_shifts_by_actual_sample_count(tmp_path):
     actual = n_trim / sample_rate
     expected_offset_us = round(actual * 1_000_000)
     actual_offset_us = (
-        (segs[0].datetime_start - datetime(2025, 1, 1, 12, 0, 0))
+        (segs[0].datetime_start - datetime(2025, 1, 1, 12, 0, 0)) #type:ignore
         .microseconds
     )
     # Allow 1 µs of slop for rounding inside timedelta

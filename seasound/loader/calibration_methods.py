@@ -9,7 +9,12 @@ system's peak-to-peak voltage.
 
 To add a new method:
     1. Create a subclass of CalibrationMethod
-    2. Implement to_pascals()
+    2. Implement to_pascals(), and — only if the method is a per-sample
+       scalar operation — calibrate_inplace() with the SAME floating-point
+       operation order. Methods that are not per-sample scalar (e.g.
+       frequency-dependent calibration) must NOT implement
+       calibrate_inplace(); the base-class implementation raises so the
+       streaming pipeline fails loudly instead of silently mis-calibrating.
     3. Add it to CALIBRATION_METHOD_REGISTRY
     4. Add the method name to the valid_cal_methods set in config.py validate()
 """
@@ -59,7 +64,39 @@ class CalibrationMethod(ABC):
         np.ndarray
             Audio data in Pascals.
         """
-        ...
+
+    def calibrate_inplace(
+        self,
+        block: np.ndarray,
+        sensitivity_db: float,
+        vpp: float,
+    ) -> np.ndarray:
+        """
+        Calibrate one audio block in place and return it.
+
+        Streaming counterpart of to_pascals(): mutates ``block`` instead
+        of allocating a calibrated copy, applying the SAME floating-point
+        operations in the SAME order so the result is bit-identical to
+        ``to_pascals(block, ...)``. Do NOT collapse the per-step scalars
+        into one pre-combined gain — float multiplication is not
+        associative, and a single combined multiply diverges from the
+        legacy result in the last bit for a substantial fraction of
+        samples, breaking the refactor's bit-identity gates.
+
+        The base implementation raises: any method that cannot be
+        expressed as per-sample scalar arithmetic (e.g. a future
+        frequency-dependent calibration, which must be applied in the
+        spectral domain or via filtering) must fail loudly here rather
+        than be silently mis-applied per block.
+        """
+        raise NotImplementedError(
+            f"Calibration method '{self.name}' does not support in-place "
+            f"per-block application. Streaming requires per-sample scalar "
+            f"calibration; non-scalar methods must be applied in the "
+            f"spectral domain and are not yet supported by the streaming "
+            f"pipeline."
+        )
+
 
 
 class SoundTrapMethod(CalibrationMethod):
@@ -85,6 +122,13 @@ class SoundTrapMethod(CalibrationMethod):
         cal_linear = 10.0 ** (sensitivity_db / 20.0)
         pressure_upa = samples * cal_linear
         return pressure_upa * 1e-6
+
+    def calibrate_inplace(self, block, sensitivity_db, vpp):
+        # Same operations, same order as to_pascals (bit-identity).
+        cal_linear = 10.0 ** (sensitivity_db / 20.0)
+        block *= cal_linear
+        block *= 1e-6
+        return block
 
 
 class StandardMethod(CalibrationMethod):
@@ -114,6 +158,14 @@ class StandardMethod(CalibrationMethod):
         sensitivity_linear = 10.0 ** (sensitivity_db / 20.0)
         pressure_upa = volts / sensitivity_linear
         return pressure_upa * 1e-6
+
+    def calibrate_inplace(self, block, sensitivity_db, vpp):
+        # Same operations, same order as to_pascals (bit-identity).
+        block *= (vpp / 2.0)
+        sensitivity_linear = 10.0 ** (sensitivity_db / 20.0)
+        block /= sensitivity_linear
+        block *= 1e-6
+        return block
 
 
 # ---------------------------------------------------------------------------
